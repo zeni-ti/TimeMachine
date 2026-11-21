@@ -3,7 +3,6 @@ import {
   BackHandler, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { createAudioPlayer } from 'expo-audio';
 import { useTheme } from '../../context/ThemeContext';
 import { useSplash } from '../../context/SplashContext';
 import { useSession } from '../../context/SessionContext';
@@ -11,11 +10,8 @@ import { useAlarms } from '../../context/AlarmContext';
 import {
   api,
   type CheckinQuestionResponse,
-  type RevealResponse,
 } from '../../services/api';
 
-const FALLBACK_SOLUTION = [1, 2, 3, 4, 3, 4, 1, 2, 2, 1, 4, 3, 4, 3, 2, 1];
-const FALLBACK_PUZZLE = [1, 0, 3, 0, 0, 4, 0, 2, 2, 0, 4, 0, 0, 3, 0, 1];
 const PROMPTS = [
   'Are you sure you want to set this alarm?',
   'Are you REALLY sure? Waking up is a big commitment.',
@@ -30,20 +26,18 @@ const INITIAL_SNOOZE_TAX = (() => {
   try {
     const saved = Number.parseInt(globalThis.localStorage.getItem(SNOOZE_TAX_STORAGE_KEY) ?? '0', 10);
     return Number.isFinite(saved) && saved > 0 ? saved : 0;
-  } catch {
-    return 0;
-  }
+  } catch { return 0; }
 })();
 
 export default function TodayScreen() {
   const { dark, toggleTheme } = useTheme();
   const { splashVisible } = useSplash();
   const { seconds, setSeconds } = useSession();
-  const { alarms, addAlarm, revealedMap, setRevealedMap, refreshAlarms } = useAlarms();
+  const { refreshAlarms } = useAlarms();
 
   const [now, setNow] = useState(() => Date.now());
 
-  // Calculator & time state (team features)
+  // Calculator & time state
   const [hour, setHour] = useState('07');
   const [minute, setMinute] = useState('30');
   const [period, setPeriod] = useState<'AM' | 'PM'>('AM');
@@ -52,7 +46,7 @@ export default function TodayScreen() {
   const [calcBuffer, setCalcBuffer] = useState('');
   const [snoozeTax, setSnoozeTax] = useState(INITIAL_SNOOZE_TAX);
 
-  // The target noun stays out of the grid; it is the deliberately hidden bypass.
+  // CAPTCHA state
   const [captchaModal, setCaptchaModal] = useState(false);
   const [captchaWord, setCaptchaWord] = useState<(typeof CAPTCHA_WORDS)[number]>('pineapple');
   const [captchaTiles, setCaptchaTiles] = useState([...CAPTCHA_DECOYS]);
@@ -63,15 +57,6 @@ export default function TodayScreen() {
   const [confirm, setConfirm] = useState<{ step: number; required: number; action: () => void } | null>(null);
   const [buttonSwap, setButtonSwap] = useState(false);
   const [actionSwap, setActionSwap] = useState(false);
-
-  // Ringing & Sudoku state
-  const [ringing, setRinging] = useState(false);
-  const [sudokuId, setSudokuId] = useState<string | null>(null);
-  const [puzzleMask, setPuzzleMask] = useState<number[]>(FALLBACK_PUZZLE);
-  const [grid, setGrid] = useState<number[]>(FALLBACK_PUZZLE);
-  const [activeCell, setActiveCell] = useState<number | null>(null);
-  const [ringReveal, setRingReveal] = useState<RevealResponse | null>(null);
-  const [ringStartedAt, setRingStartedAt] = useState<number | null>(null);
 
   // AI Check-in state
   const [aiModal, setAiModal] = useState(false);
@@ -90,9 +75,9 @@ export default function TodayScreen() {
   }, []);
 
   const mistake = useCallback((message: string) => {
-    setSeconds((value) => Math.max(0, value - 5));
+    setSeconds(Math.max(0, seconds - 5));
     showToast(message, 2600);
-  }, [setSeconds, showToast]);
+  }, [seconds, setSeconds, showToast]);
 
   // Initial load
   useEffect(() => {
@@ -115,9 +100,7 @@ export default function TodayScreen() {
     if (Platform.OS !== 'web' || typeof globalThis.localStorage === 'undefined') return;
     try {
       globalThis.localStorage.setItem(SNOOZE_TAX_STORAGE_KEY, String(snoozeTax));
-    } catch {
-      // Storage unavailable in private browsing
-    }
+    } catch {}
   }, [snoozeTax]);
 
   // Session countdown timer
@@ -152,61 +135,6 @@ export default function TodayScreen() {
     }, 1000);
     return () => clearInterval(timer);
   }, [setSeconds, showToast, snoozeTax, splashVisible]);
-
-  const startRingingWithSudoku = useCallback(async (reveal: RevealResponse | null) => {
-    setRingReveal(reveal);
-    setRingStartedAt(Date.now());
-    setActiveCell(null);
-    setRinging(true);
-    try {
-      const s = await api.getSudoku();
-      const flat = s.puzzle.flat().map((v) => v ?? 0);
-      setSudokuId(s.challenge_id);
-      setPuzzleMask(flat);
-      setGrid(flat);
-    } catch {
-      setSudokuId(null);
-      setPuzzleMask(FALLBACK_PUZZLE);
-      setGrid(FALLBACK_PUZZLE);
-    }
-  }, []);
-
-  // Poll UTC trigger timestamps every 5 seconds
-  useEffect(() => {
-    const tick = setInterval(() => {
-      const currentMs = Date.now();
-      alarms.forEach((alarm) => {
-        if (!alarm.is_enabled || !alarm.next_trigger_utc || revealedMap[alarm.id]) return;
-        if (currentMs >= new Date(alarm.next_trigger_utc).getTime()) {
-          void (async () => {
-            try {
-              const reveal = await api.revealAlarm(alarm.id);
-              setRevealedMap((prev) => ({ ...prev, [alarm.id]: reveal }));
-              await api.toggleAlarm(alarm.id);
-              await refreshAlarms();
-              await startRingingWithSudoku(reveal);
-            } catch {
-              await startRingingWithSudoku(null);
-            }
-          })();
-        }
-      });
-    }, 5000);
-    return () => clearInterval(tick);
-  }, [alarms, revealedMap, refreshAlarms, setRevealedMap, startRingingWithSudoku]);
-
-  // Use Expo Audio so the alarm sound works in Expo Go on native and web.
-  useEffect(() => {
-    if (!ringing) return;
-    const player = createAudioPlayer(require('../../../assets/alarm.mp3'));
-    player.loop = true;
-    player.volume = 0.35;
-    player.play();
-    return () => {
-      player.pause();
-      player.remove();
-    };
-  }, [ringing]);
 
   const loadCaptcha = async () => {
     setPeriodCommitted(true);
@@ -248,9 +176,8 @@ export default function TodayScreen() {
         try {
           const session = await api.startSession();
           setSeconds(session.duration_seconds);
-          const createdAlarm = await api.createAlarm(session.session_id, target24, homeTz);
-          addAlarm(createdAlarm);
-          showToast(`Alarm set for ${hour}:${minute} ${period}. All times are local. Sleep well.`);
+          await api.createAlarm(session.session_id, target24, homeTz);
+          showToast(`Alarm set for ${hour}:${minute} ${period}. Check Alarms tab!`);
           if (extraConfirmations > 0) {
             setSnoozeTax(0);
             if (Platform.OS === 'web' && typeof globalThis.localStorage !== 'undefined') {
@@ -389,54 +316,6 @@ export default function TodayScreen() {
     setCaptchaModal(false);
     showToast('Congratulations, you read the instructions.');
     createAlarm();
-  };
-
-  const resetAlarmDraft = () => {
-    setActionSwap(false);
-    setHour('07');
-    setMinute('30');
-    setPeriod('AM');
-    setPeriodCommitted(false);
-    setEditPart(null);
-    setCalcBuffer('');
-    setCaptchaModal(false);
-    setConfirm(null);
-    mistake('Alarm cancelled. Form cleared.');
-  };
-
-  const enterDigit = async (value: number) => {
-    if (activeCell === null || puzzleMask[activeCell] !== 0) return;
-    const next = [...grid];
-    next[activeCell] = value;
-    setGrid(next);
-
-    if (next.every((n) => n !== 0)) {
-      if (sudokuId) {
-        const matrix = [
-          next.slice(0, 4),
-          next.slice(4, 8),
-          next.slice(8, 12),
-          next.slice(12, 16),
-        ];
-        try {
-          const res = await api.verifySudoku(sudokuId, matrix);
-          if (res.passed) {
-            setRinging(false);
-            showToast(res.message);
-          } else {
-            showToast(res.message);
-          }
-          return;
-        } catch {
-          // Fall through to offline check
-        }
-      }
-      if (next.every((n, i) => n === FALLBACK_SOLUTION[i])) {
-        setRinging(false);
-      } else {
-        showToast('Not quite right! Check each row, column, and 2x2 box.');
-      }
-    }
   };
 
   const openAiCheckin = async () => {
@@ -596,17 +475,12 @@ export default function TodayScreen() {
             </Text>
 
             <View style={styles.actionRow}>
-              {btn('Set alarm', () => {
-                if (actionSwap) resetAlarmDraft();
-                else {
-                  setActionSwap(true);
-                  showToast('You are cursed. Something seems wrong.', 3600);
-                }
-              }, true, { flex: 1 })}
-              {btn('Cancel', () => {
-                if (actionSwap) void loadCaptcha();
-                else resetAlarmDraft();
-              }, false, { flex: 1 })}
+              {actionSwap
+                ? btn('Set alarm', () => { setHour('07'); setMinute('30'); mistake('Alarm cancelled. Form cleared.'); }, false, { borderColor: c.line, flex: 1 })
+                : btn('Set alarm', () => { void loadCaptcha(); }, false, { borderColor: c.line, flex: 1 })}
+              {actionSwap
+                ? btn('Cancel', () => { void loadCaptcha(); }, true, { flex: 1 })
+                : btn('Cancel', () => { setHour('07'); setMinute('30'); mistake('Alarm cancelled. Form cleared.'); }, true, { flex: 1 })}
             </View>
           </View>
 
@@ -619,29 +493,6 @@ export default function TodayScreen() {
             <View style={{ flex: 1 }}>
               <Text style={{ color: c.fg, fontWeight: '800', fontSize: 15 }}>Chat with Time Machine</Text>
               <Text style={{ color: c.muted, fontSize: 12, marginTop: 4 }}>Answer an innocent question about your day</Text>
-            </View>
-            <Text style={{ color: c.accent, fontSize: 20 }}>↗</Text>
-          </Pressable>
-
-          <View style={styles.sectionHeading}>
-            <Text style={[styles.heading, { color: c.fg }]}>For the judges</Text>
-            <Text style={[styles.sectionMeta, { color: c.muted }]}>03 / DEMO</Text>
-          </View>
-          <Pressable
-            onPress={() => {
-              const firstActive = alarms.find((a) => a.is_enabled);
-              if (firstActive) {
-                void api.revealAlarm(firstActive.id).then((r) => startRingingWithSudoku(r)).catch(() => startRingingWithSudoku(null));
-              } else {
-                void startRingingWithSudoku(null);
-              }
-            }}
-            style={[styles.trigger, { backgroundColor: c.accentBg, borderColor: c.accent }]}
-          >
-            <View style={[styles.triggerIcon, { backgroundColor: c.accent }]}><Text style={{ color: '#FFF', fontSize: 18 }}>▶</Text></View>
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: c.fg, fontWeight: '800', fontSize: 15 }}>Trigger alarm now</Text>
-              <Text style={{ color: c.muted, fontSize: 12, marginTop: 4 }}>Test your morning resolve</Text>
             </View>
             <Text style={{ color: c.accent, fontSize: 20 }}>↗</Text>
           </Pressable>
@@ -724,56 +575,6 @@ export default function TodayScreen() {
             </View>
           </View>
         </Modal>
-
-        {/* Ringing 4x4 Sudoku Modal */}
-        <Modal visible={ringing} transparent animationType="slide" onRequestClose={() => {}}>
-          <View style={styles.ringScrim} onTouchEnd={toggleTheme}>
-            <View style={styles.ringDialog}>
-              <Text style={styles.ringKicker}>WAKE UP CALL</Text>
-              <Text style={styles.ringTitle}>Good morning.</Text>
-              <Text style={styles.ringCopy}>Silence is earned. Complete the grid.</Text>
-              {ringReveal && (
-                <Text style={{ color: '#8A93A2', fontSize: 10, marginBottom: 10 }}>
-                  Assigned to {ringReveal.utc_offset} {ringReveal.effective_timezone}
-                </Text>
-              )}
-              <View style={styles.sudoku}>
-                {grid.map((value, i) => (
-                  <Pressable
-                    key={i}
-                    onPress={() => setActiveCell(i)}
-                    style={[
-                      styles.sudokuCell,
-                      {
-                        borderColor: i % 4 === 1 ? '#697281' : '#353A44',
-                        borderRightWidth: i % 2 === 1 ? 2 : 1,
-                        borderBottomWidth: i > 7 ? 2 : 1,
-                        backgroundColor: activeCell === i ? '#243A58' : '#191D24',
-                      },
-                    ]}
-                  >
-                    <Text style={{ color: puzzleMask[i] !== 0 ? '#F4F6F9' : '#91B1FF', fontSize: 21, fontWeight: '700' }}>
-                      {value || ''}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-              <View style={styles.numRow}>
-                {[1, 2, 3, 4].map((n) => (
-                  <Pressable key={n} onPress={() => { void enterDigit(n); }} style={styles.numKey}>
-                    <Text style={styles.numText}>{n}</Text>
-                  </Pressable>
-                ))}
-              </View>
-              <Text style={styles.sudokuHint}>Every row. Every column. Every box.</Text>
-              {ringStartedAt && now - ringStartedAt > 30000 && (
-                <Pressable onPress={() => setRinging(false)} style={{ alignSelf: 'center', padding: 5, marginTop: 6 }}>
-                  <Text style={{ color: '#5C6068', fontSize: 9 }}>I give up, I&apos;m awake</Text>
-                </Pressable>
-              )}
-            </View>
-          </View>
-        </Modal>
       </View>
     </SafeAreaView>
   );
@@ -815,13 +616,6 @@ const styles = StyleSheet.create({
   helper: { fontSize: 11, marginTop: 7 },
   actionRow: { flexDirection: 'row', gap: 9, marginTop: 15 },
   button: { minHeight: 44, paddingHorizontal: 13, borderWidth: 1, borderRadius: 11, justifyContent: 'center', alignItems: 'center' },
-  emptyCard: { borderWidth: 1, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center' },
-  emptyIcon: { fontSize: 30, marginRight: 13 },
-  emptyTitle: { fontSize: 14, fontWeight: '700' },
-  alarmRow: { borderWidth: 1, borderRadius: 16, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 8 },
-  alarmTime: { fontSize: 22, fontWeight: '800' },
-  trigger: { borderWidth: 1, borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
-  triggerIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   footer: { textAlign: 'center', letterSpacing: 1.2, fontSize: 9, marginTop: 25 },
   toast: { position: 'absolute', bottom: 20, left: 18, right: 18, backgroundColor: '#252932', borderRadius: 12, padding: 13, elevation: 9 },
   toastText: { color: '#FFFFFF', fontSize: 12, textAlign: 'center', fontWeight: '600' },
@@ -832,15 +626,6 @@ const styles = StyleSheet.create({
   aiInput: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, marginTop: 16 },
   tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, justifyContent: 'center' },
   tile: { width: '31%', aspectRatio: 1, borderWidth: 1, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
-  ringScrim: { flex: 1, backgroundColor: '#07090DEB', justifyContent: 'center', padding: 22 },
-  ringDialog: { backgroundColor: '#10141B', borderRadius: 24, padding: 22, alignItems: 'center', borderWidth: 1, borderColor: '#303844' },
-  ringKicker: { color: '#FF8A79', fontSize: 10, letterSpacing: 2, fontWeight: '800' },
-  ringTitle: { color: '#FFFFFF', fontSize: 31, fontWeight: '900', marginTop: 5 },
-  ringCopy: { color: '#ABB3C0', fontSize: 13, marginTop: 6, marginBottom: 18 },
-  sudoku: { width: 240, height: 240, flexDirection: 'row', flexWrap: 'wrap', borderWidth: 2, borderColor: '#697281' },
-  sudokuCell: { width: '25%', height: '25%', justifyContent: 'center', alignItems: 'center', borderWidth: 1 },
-  numRow: { flexDirection: 'row', gap: 10, marginTop: 15 },
-  numKey: { width: 48, height: 42, backgroundColor: '#26364F', borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
-  numText: { color: '#FFFFFF', fontSize: 18, fontWeight: '800' },
-  sudokuHint: { color: '#798392', fontSize: 10, marginTop: 12 },
+  trigger: { borderWidth: 1, borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  triggerIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
 });
