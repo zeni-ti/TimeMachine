@@ -3,6 +3,7 @@ import {
   BackHandler, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { createAudioPlayer } from 'expo-audio';
 import { useTheme } from '../../context/ThemeContext';
 import { useSplash } from '../../context/SplashContext';
 import { useSession } from '../../context/SessionContext';
@@ -77,7 +78,6 @@ export default function TodayScreen() {
   const [aiCheckin, setAiCheckin] = useState<CheckinQuestionResponse | null>(null);
   const [aiReplyInput, setAiReplyInput] = useState('');
 
-  const audioRef = useRef<{ close?: () => void } | null>(null);
   const secondsRef = useRef(seconds);
 
   const c = dark
@@ -195,43 +195,17 @@ export default function TodayScreen() {
     return () => clearInterval(tick);
   }, [alarms, revealedMap, refreshAlarms, setRevealedMap, startRingingWithSudoku]);
 
-  // Ringing buzzer (web / compatible runtimes)
+  // Use Expo Audio so the alarm sound works in Expo Go on native and web.
   useEffect(() => {
-    if (!ringing) {
-      audioRef.current?.close?.();
-      audioRef.current = null;
-      return;
-    }
-    const g = globalThis as typeof globalThis & { AudioContext?: new () => any; webkitAudioContext?: new () => any };
-    const AudioCtor = g.AudioContext ?? g.webkitAudioContext;
-    if (AudioCtor) {
-      try {
-        const ctx = new AudioCtor();
-        audioRef.current = ctx;
-        let step = 0;
-        const play = () => {
-          if (ctx.state === 'suspended') void ctx.resume();
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'square';
-          osc.frequency.value = step++ % 2 ? 740 : 520;
-          gain.gain.value = 0.035;
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start();
-          osc.stop(ctx.currentTime + 0.16);
-        };
-        play();
-        const id = setInterval(play, 420);
-        return () => {
-          clearInterval(id);
-          void ctx.close();
-          audioRef.current = null;
-        };
-      } catch {
-        // Audio unavailable on some native runtimes
-      }
-    }
+    if (!ringing) return;
+    const player = createAudioPlayer(require('../../../assets/alarm.mp3'));
+    player.loop = true;
+    player.volume = 0.35;
+    player.play();
+    return () => {
+      player.pause();
+      player.remove();
+    };
   }, [ringing]);
 
   const loadCaptcha = async () => {
