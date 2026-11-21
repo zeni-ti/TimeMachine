@@ -3,15 +3,11 @@ import {
   BackHandler, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTheme } from '../../context/ThemeContext';
+import { useSplash } from '../../context/SplashContext';
+import { getRandomZone, useAlarms, Zone } from '../../context/AlarmContext';
+import { useSession } from '../../context/SessionContext';
 
-type Zone = { label: string; offset: number };
-type Alarm = { id: number; hour: number; minute: number; period: 'AM' | 'PM'; zone: Zone; enabled: boolean; revealed: boolean; extraConfirmations: number };
-
-const ZONES: Zone[] = [
-  { label: 'Niue', offset: -11 }, { label: 'Honolulu', offset: -10 }, { label: 'Los Angeles', offset: -8 },
-  { label: 'New York', offset: -5 }, { label: 'Reykjavik', offset: 0 }, { label: 'Kathmandu', offset: 5.75 },
-  { label: 'Bangkok', offset: 7 }, { label: 'Tokyo', offset: 9 }, { label: 'Kiritimati', offset: 14 },
-];
 const CAPTCHA_TILES = ['🍌', '📎', '☁️', '🧦', '🪴', '📚', '🧃', '🪑', '🧤'];
 const SOLUTION = [1, 2, 3, 4, 3, 4, 1, 2, 2, 1, 4, 3, 4, 3, 2, 1];
 const PUZZLE = [1, 0, 3, 0, 0, 4, 0, 2, 2, 0, 4, 0, 0, 3, 0, 1];
@@ -20,19 +16,28 @@ const PROMPTS = [
   'Are you REALLY sure? Waking up is a big commitment.',
   "Final check: Do you solemnly swear you won't snooze this?",
 ];
+const SNOOZE_TAX_STORAGE_KEY = 'timemachine:snooze-tax';
+const INITIAL_SNOOZE_TAX = (() => {
+  if (Platform.OS !== 'web' || typeof globalThis.localStorage === 'undefined') return 0;
+  try {
+    const saved = Number.parseInt(globalThis.localStorage.getItem(SNOOZE_TAX_STORAGE_KEY) ?? '0', 10);
+    return Number.isFinite(saved) && saved > 0 ? saved : 0;
+  } catch { return 0; }
+})();
 
 export default function TodayScreen() {
-  const [dark, setDark] = useState(false);
+  const { dark, toggleTheme } = useTheme();
+  const { splashVisible } = useSplash();
+  const { setAlarms } = useAlarms();
+  const { seconds, setSeconds } = useSession();
   const [now, setNow] = useState(0);
-  const [seconds, setSeconds] = useState(45);
   const [hour, setHour] = useState('07');
   const [minute, setMinute] = useState('30');
   const [period, setPeriod] = useState<'AM' | 'PM'>('AM');
   const [periodCommitted, setPeriodCommitted] = useState(false);
   const [editPart, setEditPart] = useState<'hour' | 'minute' | null>(null);
   const [calcBuffer, setCalcBuffer] = useState('');
-  const [snoozeTax, setSnoozeTax] = useState(0);
-  const [alarms, setAlarms] = useState<Alarm[]>([]);
+  const [snoozeTax, setSnoozeTax] = useState(INITIAL_SNOOZE_TAX);
   const [captcha, setCaptcha] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
   const [attempts, setAttempts] = useState(0);
@@ -52,20 +57,26 @@ export default function TodayScreen() {
     setSeconds((value) => Math.max(0, value - 5));
     setNotice(message);
     setTimeout(() => setNotice(''), 2600);
-  }, []);
+  }, [setSeconds]);
 
   useEffect(() => {
+    if (splashVisible) return;
     const timer = setInterval(() => {
       setNow(Date.now());
       if (seconds <= 1) {
-        setHour('07'); setMinute('30'); setPeriod('AM'); setPeriodCommitted(false); setAlarms([]); setEditPart(null); setCalcBuffer(''); setSnoozeTax(0);
-        setNotice('Session Expired Due to Inactivity (Even Though You Were Clicking)');
+        setHour('07'); setMinute('30'); setPeriod('AM'); setPeriodCommitted(false); setEditPart(null); setCalcBuffer('');
+        setNotice(`Session expired! Your alarm draft was wiped, but your Snooze Tax of ${snoozeTax} carried over.`);
         setTimeout(() => setNotice(''), 3500);
         setSeconds(45);
       } else { setSeconds(seconds - 1); }
     }, 1000);
     return () => clearInterval(timer);
-  }, [seconds]);
+  }, [seconds, snoozeTax, splashVisible, setSeconds]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof globalThis.localStorage === 'undefined') return;
+    try { globalThis.localStorage.setItem(SNOOZE_TAX_STORAGE_KEY, String(snoozeTax)); } catch { /* Storage may be unavailable in private browsing. */ }
+  }, [snoozeTax]);
 
   useEffect(() => {
     const tick = setInterval(() => {
@@ -84,7 +95,7 @@ export default function TodayScreen() {
       }));
     }, 15000);
     return () => clearInterval(tick);
-  }, []);
+  }, [setAlarms]);
 
   useEffect(() => {
     if (!ringing) { audioRef.current?.close?.(); audioRef.current = null; return; }
@@ -107,8 +118,6 @@ export default function TodayScreen() {
     }
   }, [ringing]);
 
-  const toggleTheme = () => setDark((value) => !value);
-  const randomZone = () => ZONES[Math.floor(Math.random() * ZONES.length)];
   const openCaptcha = () => {
     if (!editPart) { mistake('Select H or M before continuing. The display is locked.'); return; }
     setPeriodCommitted(true);
@@ -124,21 +133,16 @@ export default function TodayScreen() {
     const h = Math.max(0, Math.min(12, Number(hour) || 0));
     const m = Math.max(0, Math.min(59, Number(minute) || 0));
     const alarmPeriod = period;
-    const zone = randomZone();
+    const zone = getRandomZone();
     setHour(String(h).padStart(2, '0')); setMinute(String(m).padStart(2, '0'));
     const extraConfirmations = snoozeTax;
     beginConfirm(() => {
       setAlarms((items) => [...items, { id: Date.now(), hour: h, minute: m, period: alarmPeriod, zone, enabled: true, revealed: false, extraConfirmations }]);
-      setSnoozeTax(0);
+      if (extraConfirmations > 0) {
+        setSnoozeTax(0);
+        setNotice('Snooze Tax paid in full. For now.'); setTimeout(() => setNotice(''), 3000);
+      }
     }, extraConfirmations);
-  };
-  const toggleAlarm = (id: number) => {
-    const alarm = alarms.find((item) => item.id === id);
-    beginConfirm(() => setAlarms((items) => items.map((a) => a.id === id ? { ...a, enabled: !a.enabled, zone: randomZone() } : a)), alarm?.extraConfirmations ?? 0);
-  };
-  const deleteAlarm = (id: number) => {
-    const alarm = alarms.find((item) => item.id === id);
-    beginConfirm(() => setAlarms((items) => items.filter((a) => a.id !== id)), alarm?.extraConfirmations ?? 0);
   };
   const chooseTimePart = (part: 'hour' | 'minute') => { setEditPart(part); setCalcBuffer(''); setPeriodCommitted(false); };
   const setTimePart = (value: string) => {
@@ -149,7 +153,7 @@ export default function TodayScreen() {
     const normalized = String(numeric % (max + 1)).padStart(2, '0');
     if (editPart === 'hour') setHour(normalized); else setMinute(normalized);
     setPeriodCommitted(false);
-    setAlarms((items) => items.map((alarm) => ({ ...alarm, zone: randomZone() })));
+    setAlarms((items) => items.map((alarm) => ({ ...alarm, zone: getRandomZone() })));
     if (wrapped) mistake(`${numeric} wrapped around to ${normalized}. Time is a circle.`);
   };
   const pressDigit = (digit: string) => {
@@ -203,11 +207,19 @@ export default function TodayScreen() {
       const nextHour24 = Math.floor(total / 60);
       setHour(String(nextHour24 % 12 || 12).padStart(2, '0')); setMinute(String(total % 60).padStart(2, '0'));
       setPeriod(nextHour24 >= 12 ? 'PM' : 'AM'); setPeriodCommitted(false);
-      setAlarms((items) => items.map((alarm) => ({ ...alarm, zone: randomZone() })));
+      setAlarms((items) => items.map((alarm) => ({ ...alarm, zone: getRandomZone() })));
       setSnoozeTax((value) => value + 1); setCalcBuffer('');
       setNotice(`Chaos added +${added >= 60 ? `${added / 60}h` : `${added}m`}. Snooze tax +1.`); setTimeout(() => setNotice(''), 2600);
     }
     else { mistake(`${operator} applied to your morning. Somehow.`); setCalcBuffer(''); }
+  };
+  const resetDemoDebt = () => {
+    setSnoozeTax(0);
+    setAlarms((items) => items.map((alarm) => ({ ...alarm, extraConfirmations: 0 })));
+    if (Platform.OS === 'web' && typeof globalThis.localStorage !== 'undefined') {
+      try { globalThis.localStorage.removeItem(SNOOZE_TAX_STORAGE_KEY); } catch { /* Storage may be unavailable in private browsing. */ }
+    }
+    setNotice('Demo debt forgiven. Try not to celebrate too loudly.'); setTimeout(() => setNotice(''), 2600);
   };
   const verifyCaptcha = () => {
     if (attempts >= 2) { setCaptcha(false); setNotice('Verification passed. Probably.'); createAlarm(); }
@@ -281,12 +293,10 @@ export default function TodayScreen() {
             </View>
           </View>
 
-          <View style={styles.sectionHeading}><Text style={[styles.heading, { color: c.fg }]}>Scheduled</Text><Text style={[styles.sectionMeta, { color: c.muted }]}>{String(alarms.length).padStart(2, '0')} ALARMS</Text></View>
-          {alarms.length === 0 ? <View style={[styles.emptyCard, { backgroundColor: c.card, borderColor: c.line }]}><Text style={[styles.emptyIcon, { color: c.accent }]}>◷</Text><View><Text style={[styles.emptyTitle, { color: c.fg }]}>Nothing set. For now.</Text><Text style={[styles.helper, { color: c.muted }]}>Your future self is cautiously optimistic.</Text></View></View> : alarms.map((alarm) => <View key={alarm.id} style={[styles.alarmRow, { backgroundColor: c.card, borderColor: c.line }]}><View style={{ flex: 1 }}><Text style={[styles.alarmTime, { color: c.fg }]}>{String(alarm.hour).padStart(2, '0')}:{String(alarm.minute).padStart(2, '0')}</Text><Text style={{ color: c.muted, fontSize: 12, marginTop: 3 }}>{alarm.enabled ? 'Repeats whenever it feels like it' : 'Paused'} · Snooze tax +{alarm.extraConfirmations}</Text>{alarm.revealed && <Text style={{ color: c.muted, opacity: 0.55, fontSize: 9, marginTop: 4 }}>Assigned to UTC{alarm.zone.offset >= 0 ? '+' : ''}{alarm.zone.offset} {alarm.zone.label} · Actual period: {alarm.period}</Text>}</View>{btn(alarm.enabled ? 'On' : 'Off', () => toggleAlarm(alarm.id), alarm.enabled)}{btn('Delete', () => deleteAlarm(alarm.id))}</View>)}
-
           <View style={styles.sectionHeading}><Text style={[styles.heading, { color: c.fg }]}>For the judges</Text><Text style={[styles.sectionMeta, { color: c.muted }]}>02 / DEMO</Text></View>
           <Pressable onPress={triggerAlarm} style={[styles.trigger, { backgroundColor: c.accentBg, borderColor: c.accent }]}><View style={[styles.triggerIcon, { backgroundColor: c.accent }]}><Text style={{ color: '#FFF', fontSize: 18 }}>▶</Text></View><View style={{ flex: 1 }}><Text style={{ color: c.fg, fontWeight: '800', fontSize: 15 }}>Trigger alarm now</Text><Text style={{ color: c.muted, fontSize: 12, marginTop: 4 }}>Test your morning resolve</Text></View><Text style={{ color: c.accent, fontSize: 20 }}>↗</Text></Pressable>
           <Text style={[styles.footer, { color: c.muted }]}>DESIGNED TO GET YOU UP. EVENTUALLY.</Text>
+          <Pressable onPress={resetDemoDebt} hitSlop={8} style={{ alignSelf: 'center', paddingVertical: 8, paddingHorizontal: 10 }}><Text style={{ color: c.muted, opacity: 0.42, fontSize: 9 }}>Reset Demo Debt</Text></Pressable>
         </ScrollView>
 
         {!!notice && <View pointerEvents="none" style={styles.toast}><Text style={styles.toastText}>{notice}</Text></View>}
