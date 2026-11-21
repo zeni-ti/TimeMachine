@@ -164,7 +164,7 @@ export default function TodayScreen() {
         <ScrollView contentContainerStyle={styles.page} showsVerticalScrollIndicator={false}>
           <View style={styles.topLine}>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.brand, { color: c.fg }]}>MALFUNCTION<Text style={{ color: c.accent }}>.</Text></Text>
+              <Text style={[styles.brand, { color: c.fg }]}>TimeMachine<Text style={{ color: c.accent }}>.</Text></Text>
               <Text style={[styles.kicker, { color: c.muted }]}>SLEEP, WITH COMPLICATIONS</Text>
             </View>
             <View style={[styles.session, { backgroundColor: c.card, borderColor: c.line }]}>

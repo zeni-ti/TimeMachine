@@ -1,8 +1,8 @@
-# Malfunction
+# TimeMachine
 
 ### Your mornings, made needlessly difficult.
 
-Malfunction is a comedy alarm clock built for a hackathon. It looks like a calm, modern sleep app, then turns the simple act of setting an alarm into a chain of deeply questionable decisions.
+TimeMachine is a comedy alarm clock built for the Malfunction hackathon. It looks like a calm, modern sleep app, then turns the simple act of setting an alarm into a chain of deeply questionable decisions.
 
 > Set an alarm. Question your choices. Solve a puzzle. Maybe wake up.
 
@@ -63,4 +63,4 @@ npx tsc --noEmit     # Run TypeScript checks
 
 ---
 
-Made to make a simple morning unnecessarily complicated.
+Made to make a simple morning unnecessarily complicated by the TimeMachine team.
