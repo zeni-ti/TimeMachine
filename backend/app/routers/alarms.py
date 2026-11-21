@@ -17,7 +17,7 @@ from app.services.timezone_calc import compute_next_trigger_utc
 
 router = APIRouter(prefix="/alarms", tags=["Alarms"])
 
-SESSION_DURATION_SECONDS = 18
+SESSION_DURATION_SECONDS = 45
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:
@@ -236,3 +236,26 @@ def delete_alarm(alarm_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Alarm not found.")
     db.delete(alarm)
     db.commit()
+
+@router.post("/{alarm_id}/reveal")
+def reveal_alarm_timezone(alarm_id: str, db: Session = Depends(get_db)):
+    """Called when an alarm rings to expose which timezone actually triggered it."""
+    from zoneinfo import ZoneInfo
+
+    alarm = db.query(Alarm).filter(Alarm.id == alarm_id).first()
+    if not alarm:
+        raise HTTPException(status_code=404, detail="Alarm not found.")
+
+    effective_tz = _get_effective_timezone(alarm)
+    now_tz = datetime.now(timezone.utc).astimezone(ZoneInfo(effective_tz))
+    offset = now_tz.utcoffset() or timedelta(0)
+    total_mins = int(offset.total_seconds() // 60)
+    sign = "+" if total_mins >= 0 else "-"
+    abs_mins = abs(total_mins)
+    utc_label = f"UTC{sign}{abs_mins // 60:02d}:{abs_mins % 60:02d}"
+
+    return {
+        "alarm_id": alarm.id,
+        "effective_timezone": effective_tz,
+        "utc_offset": utc_label,
+    }
