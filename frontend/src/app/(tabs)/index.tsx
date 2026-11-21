@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  BackHandler, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+  BackHandler, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+  type ScrollViewInstance,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
@@ -20,6 +21,17 @@ const PROMPTS = [
 ];
 const CAPTCHA_WORDS = ['pineapple', 'bicycle'] as const;
 const CAPTCHA_DECOYS = ['🍌', '🧃', '☁️', '🧸', '📎', '🌙', '🧦', '🎈', '🪴'];
+const OFFLINE_CHECKIN_QUESTION = 'How has your day been treating you so far?';
+
+type ChatMessage = { id: string; role: 'assistant' | 'user'; text: string };
+
+function offlineChatReply(text: string) {
+  const lower = text.toLowerCase();
+  if (/(tired|sleep|exhaust|work|busy)/.test(lower)) return 'That sounds like a lot to carry today. I hope you get a calmer moment soon.';
+  if (/(good|great|happy|excited|fun)/.test(lower)) return 'I’m glad there’s been a bright spot in your day. What made it feel that way?';
+  if (/(bad|sad|stress|hard|rough)/.test(lower)) return 'I’m sorry it’s been rough. You don’t have to solve the whole day at once.';
+  return 'Thanks for telling me. I’m listening, even when my sense of time is questionable.';
+}
 
 const SNOOZE_TAX_STORAGE_KEY = 'timemachine:snooze-tax';
 const INITIAL_SNOOZE_TAX = (() => {
@@ -58,11 +70,16 @@ export default function TodayScreen() {
   const [confirm, setConfirm] = useState<{ step: number; required: number; action: () => void } | null>(null);
   const [buttonSwap, setButtonSwap] = useState(false);
   const [actionSwap, setActionSwap] = useState(false);
+  const [nextCurseOnCancel, setNextCurseOnCancel] = useState(false);
+  const [activeCurseOnCancel, setActiveCurseOnCancel] = useState(false);
 
   // AI Check-in state
   const [aiModal, setAiModal] = useState(false);
   const [aiCheckin, setAiCheckin] = useState<CheckinQuestionResponse | null>(null);
   const [aiReplyInput, setAiReplyInput] = useState('');
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatScrollRef = useRef<ScrollViewInstance | null>(null);
 
   const secondsRef = useRef(seconds);
 
@@ -321,27 +338,84 @@ export default function TodayScreen() {
     createAlarm();
   };
 
-  const openAiCheckin = async () => {
-    try {
-      const q = await api.getAiQuestion();
-      setAiCheckin(q);
-      setAiReplyInput('');
-      setAiModal(true);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not reach AI persona');
+  const resetAlarmDraft = () => {
+    setActionSwap(false);
+    setHour('07');
+    setMinute('30');
+    setPeriod('AM');
+    setPeriodCommitted(false);
+    setEditPart(null);
+    setCalcBuffer('');
+    setCaptchaModal(false);
+    setConfirm(null);
+    mistake('Alarm cancelled. Form cleared.');
+  };
+
+  const handleAlarmButton = (button: 'set' | 'cancel') => {
+    const isCancelButton = button === 'cancel';
+    if (actionSwap) {
+      if (isCancelButton === activeCurseOnCancel) resetAlarmDraft();
+      else void loadCaptcha();
+      return;
+    }
+
+    const curseOnCancel = nextCurseOnCancel;
+    setActiveCurseOnCancel(curseOnCancel);
+    setNextCurseOnCancel(!curseOnCancel);
+    if (isCancelButton === curseOnCancel) {
+      setActionSwap(true);
+      showToast('You are cursed! Something seems wrong!', 3600);
+    } else {
+      void loadCaptcha();
     }
   };
 
-  const submitAiReply = async () => {
-    if (!aiCheckin || !aiReplyInput.trim()) return;
+  useEffect(() => {
+    chatScrollRef.current?.scrollToEnd({ animated: true });
+  }, [chatMessages, chatLoading]);
+
+  const openAiCheckin = async () => {
+    setAiReplyInput('');
+    setChatMessages([{ id: `welcome-${Date.now()}`, role: 'assistant', text: 'Hi, I’m Time Machine. Want to tell me how your day is going?' }]);
+    setChatLoading(true);
+    setAiModal(true);
     try {
-      const res = await api.replyAiQuestion(aiCheckin.checkin_id, aiReplyInput.trim());
-      setAiModal(false);
-      showToast(res.innocent_reply, 3500);
-      await refreshAlarms();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'AI reply failed');
+      const q = await api.getAiQuestion();
+      setAiCheckin(q);
+      setChatMessages((messages) => [...messages, { id: `question-${q.checkin_id}`, role: 'assistant', text: q.question }]);
+    } catch {
+      setAiCheckin(null);
+      setChatMessages((messages) => [...messages, { id: `offline-${Date.now()}`, role: 'assistant', text: OFFLINE_CHECKIN_QUESTION }]);
     }
+    setChatLoading(false);
+  };
+
+  const submitAiReply = async () => {
+    const text = aiReplyInput.trim();
+    if (!text || chatLoading) return;
+    const checkin = aiCheckin;
+    setAiReplyInput('');
+    setChatMessages((messages) => [...messages, { id: `user-${Date.now()}`, role: 'user', text }]);
+    setChatLoading(true);
+    let responseText: string;
+    try {
+      if (!checkin) throw new Error('offline');
+      const res = await api.replyAiQuestion(checkin.checkin_id, text);
+      responseText = res.innocent_reply;
+      await refreshAlarms().catch(() => {});
+    } catch {
+      responseText = offlineChatReply(text);
+    }
+    setChatMessages((messages) => [...messages, { id: `assistant-${Date.now()}`, role: 'assistant', text: responseText }]);
+
+    try {
+      const nextCheckin = await api.getAiQuestion();
+      setAiCheckin(nextCheckin);
+      setChatMessages((messages) => [...messages, { id: `question-${nextCheckin.checkin_id}`, role: 'assistant', text: nextCheckin.question }]);
+    } catch {
+      setAiCheckin(null);
+    }
+    setChatLoading(false);
   };
 
   const displayTime = new Date(now).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -478,12 +552,8 @@ export default function TodayScreen() {
             </Text>
 
             <View style={styles.actionRow}>
-              {actionSwap
-                ? btn('Set alarm', () => { setHour('07'); setMinute('30'); mistake('Alarm cancelled. Form cleared.'); }, false, { borderColor: c.line, flex: 1 })
-                : btn('Set alarm', () => { void loadCaptcha(); }, false, { borderColor: c.line, flex: 1 })}
-              {actionSwap
-                ? btn('Cancel', () => { void loadCaptcha(); }, true, { flex: 1 })
-                : btn('Cancel', () => { setHour('07'); setMinute('30'); mistake('Alarm cancelled. Form cleared.'); }, true, { flex: 1 })}
+              {btn('Set alarm', () => handleAlarmButton('set'), false, { borderColor: c.line, flex: 1 })}
+              {btn('Cancel', () => handleAlarmButton('cancel'), true, { flex: 1 })}
             </View>
           </View>
 
@@ -539,24 +609,61 @@ export default function TodayScreen() {
           </View>
         </Modal>
 
-        {/* AI Check-in Modal */}
+        {/* Time Machine chat */}
         <Modal visible={aiModal} transparent animationType="fade" onRequestClose={() => setAiModal(false)}>
           <View style={styles.scrim} onTouchEnd={toggleTheme}>
-            <View style={[styles.dialog, { backgroundColor: c.card }]}>
-              <Text style={[styles.modalKicker, { color: c.accent }]}>DAILY CHECK-IN</Text>
-              <Text style={[styles.modalTitle, { color: c.fg }]}>{aiCheckin?.question}</Text>
-              <TextInput
-                placeholder="Type your honest answer..."
-                placeholderTextColor={c.muted}
-                value={aiReplyInput}
-                onChangeText={setAiReplyInput}
-                style={[styles.aiInput, { color: c.fg, backgroundColor: c.bg, borderColor: c.line }]}
-              />
-              <View style={styles.actionRow}>
-                {btn('Send', () => { void submitAiReply(); }, true, { flex: 1 })}
-                {btn('Close', () => setAiModal(false), false, { flex: 1 })}
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '100%' }}>
+              <View style={[styles.chatDialog, { backgroundColor: c.card }]}>
+                <View style={styles.chatHeader}>
+                  <View style={[styles.triggerIcon, { backgroundColor: c.accentBg }]}><Text style={{ color: c.accent, fontSize: 19 }}>✦</Text></View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: c.fg, fontSize: 16, fontWeight: '800' }}>Time Machine</Text>
+                    <Text style={{ color: c.muted, fontSize: 10, marginTop: 2 }}>Daily check-in · here for a chat</Text>
+                  </View>
+                  <Pressable onPress={() => setAiModal(false)} hitSlop={10} style={styles.chatClose}>
+                    <Text style={{ color: c.muted, fontSize: 18 }}>×</Text>
+                  </Pressable>
+                </View>
+                <ScrollView
+                  ref={chatScrollRef}
+                  style={styles.chatHistory}
+                  contentContainerStyle={styles.chatMessages}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  {chatMessages.map((message) => {
+                    const fromUser = message.role === 'user';
+                    return (
+                      <View key={message.id} style={[styles.chatBubble, { alignSelf: fromUser ? 'flex-end' : 'flex-start', backgroundColor: fromUser ? c.accent : c.bg, borderColor: fromUser ? c.accent : c.line }]}>
+                        <Text style={{ color: fromUser ? '#FFFFFF' : c.fg, fontSize: 13, lineHeight: 19 }}>{message.text}</Text>
+                      </View>
+                    );
+                  })}
+                  {chatLoading && <Text style={{ color: c.muted, fontSize: 11, paddingHorizontal: 5, paddingBottom: 5 }}>Time Machine is thinking…</Text>}
+                </ScrollView>
+                <View style={styles.chatComposer}>
+                  <TextInput
+                    accessibilityLabel="Message Time Machine"
+                    placeholder="Tell me about your day…"
+                    placeholderTextColor={c.muted}
+                    value={aiReplyInput}
+                    onChangeText={setAiReplyInput}
+                    onSubmitEditing={() => { void submitAiReply(); }}
+                    returnKeyType="send"
+                    editable={!chatLoading}
+                    style={[styles.aiInput, { color: c.fg, backgroundColor: c.bg, borderColor: c.line }]}
+                  />
+                  <Pressable
+                    disabled={!aiReplyInput.trim() || chatLoading}
+                    onPress={() => { void submitAiReply(); }}
+                    style={[styles.chatSend, { backgroundColor: c.accent, opacity: !aiReplyInput.trim() || chatLoading ? 0.5 : 1 }]}
+                  >
+                    <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 12 }}>Send</Text>
+                  </Pressable>
+                </View>
+                <Text style={{ color: c.muted, fontSize: 9, marginTop: 8 }}>No rush. The clock is already being difficult.</Text>
               </View>
-            </View>
+            </KeyboardAvoidingView>
           </View>
         </Modal>
 
@@ -626,7 +733,15 @@ const styles = StyleSheet.create({
   dialog: { borderRadius: 22, padding: 20, maxWidth: 460, width: '100%', alignSelf: 'center' },
   modalKicker: { fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
   modalTitle: { fontSize: 20, fontWeight: '800', lineHeight: 27, marginTop: 8 },
-  aiInput: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, marginTop: 16 },
+  chatDialog: { borderRadius: 22, padding: 16, maxWidth: 460, width: '100%', alignSelf: 'center' },
+  chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingBottom: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#8A8F991F' },
+  chatClose: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center' },
+  chatHistory: { maxHeight: 360, minHeight: 170, marginTop: 12 },
+  chatMessages: { gap: 9, paddingVertical: 5 },
+  chatBubble: { maxWidth: '88%', borderRadius: 15, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 9 },
+  chatComposer: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 },
+  aiInput: { flex: 1, minHeight: 46, borderWidth: 1, borderRadius: 14, paddingHorizontal: 13, paddingVertical: 10, fontSize: 14 },
+  chatSend: { minHeight: 44, minWidth: 60, borderRadius: 13, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 13 },
   tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, justifyContent: 'center' },
   tile: { width: '31%', aspectRatio: 1, borderWidth: 1, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
   trigger: { borderWidth: 1, borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
