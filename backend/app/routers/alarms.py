@@ -56,6 +56,8 @@ def _get_effective_timezone(alarm: Alarm) -> str:
         return alarm.selected_timezone
     if alarm.ai_hijacked_timezone:
         return alarm.ai_hijacked_timezone
+    if alarm.selected_timezone:
+        return alarm.selected_timezone
     return alarm.home_timezone
 
 
@@ -120,11 +122,7 @@ def create_alarm(
             detail="Time ran out! Your 18-second editing session expired. Restart session.",
         )
 
-    effective_tz = (
-        payload.selected_timezone
-        if payload.timezone_mode == "manual" and payload.selected_timezone
-        else payload.home_timezone
-    )
+    effective_tz = payload.selected_timezone or payload.home_timezone
 
     try:
         next_utc = compute_next_trigger_utc(

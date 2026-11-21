@@ -24,6 +24,25 @@ export function getApiBaseUrl(): string {
 
 const DEVICE_ID = 'demo-device';
 
+const RANDOM_ALARM_TIMEZONES = [
+  'America/New_York',
+  'America/Los_Angeles',
+  'Pacific/Honolulu',
+  'Pacific/Niue',
+  'Pacific/Kiritimati',
+  'Europe/London',
+  'Europe/Paris',
+  'Asia/Kathmandu',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+];
+
+export function chooseAlarmTimezone(localTimezone: string): string {
+  if (Math.random() < 0.05) return localTimezone;
+  const alternatives = RANDOM_ALARM_TIMEZONES.filter((timezone) => timezone !== localTimezone);
+  return alternatives[Math.floor(Math.random() * alternatives.length)] ?? localTimezone;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${getApiBaseUrl()}${path}`, {
     headers: { 'Content-Type': 'application/json', ...(options?.headers ?? {}) },
@@ -114,7 +133,7 @@ export const api = {
   listAlarms: () =>
     request<AlarmListResponse>(`/alarms?device_id=${DEVICE_ID}`),
 
-  createAlarm: (sessionId: string, targetTime: string, homeTimezone: string) =>
+  createAlarm: (sessionId: string, targetTime: string, homeTimezone: string, selectedTimezone: string) =>
     request<BackendAlarm>('/alarms', {
       method: 'POST',
       body: JSON.stringify({
@@ -128,6 +147,7 @@ export const api = {
         snooze_minutes: 9,
         home_timezone: homeTimezone,
         timezone_mode: 'auto',
+        selected_timezone: selectedTimezone,
       }),
     }),
 

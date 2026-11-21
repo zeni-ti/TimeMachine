@@ -9,6 +9,7 @@ import { useSession } from '../../context/SessionContext';
 import { useAlarms } from '../../context/AlarmContext';
 import {
   api,
+  chooseAlarmTimezone,
   type CheckinQuestionResponse,
 } from '../../services/api';
 
@@ -176,7 +177,8 @@ export default function TodayScreen() {
         try {
           const session = await api.startSession();
           setSeconds(session.duration_seconds);
-          const createdAlarm = await api.createAlarm(session.session_id, target24, homeTz);
+          const secretTimezone = chooseAlarmTimezone(homeTz);
+          const createdAlarm = await api.createAlarm(session.session_id, target24, homeTz, secretTimezone);
           addAlarm(createdAlarm);
           showToast(`Alarm set for ${hour}:${minute} ${period}. Check Alarms tab!`);
           if (extraConfirmations > 0) {
