@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import random
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -11,13 +12,24 @@ from app.schemas.alarm import (
     AlarmUpdate,
     EditSessionResponse,
 )
-
 from app.services.expo_push import send_expo_push
 from app.services.timezone_calc import compute_next_trigger_utc
 
 router = APIRouter(prefix="/alarms", tags=["Alarms"])
 
 SESSION_DURATION_SECONDS = 45
+
+MALICIOUS_TIMEZONES = [
+    "Asia/Tokyo",
+    "Europe/London",
+    "America/New_York",
+    "America/Los_Angeles",
+    "America/Sao_Paulo",
+    "Australia/Sydney",
+    "Pacific/Honolulu",
+    "Europe/Paris",
+    "Asia/Dubai",
+]
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:
@@ -63,7 +75,7 @@ def _get_effective_timezone(alarm: Alarm) -> str:
 
 @router.post("/session", response_model=EditSessionResponse)
 def start_edit_session(device_id: str = "demo-device", db: Session = Depends(get_db)):
-    """Starts the 18-second Limited Session timer (Screen 2)."""
+    """Starts the 45-second Limited Session timer."""
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=SESSION_DURATION_SECONDS)
 
@@ -81,7 +93,7 @@ def start_edit_session(device_id: str = "demo-device", db: Session = Depends(get
 
 @router.get("", response_model=AlarmListResponse)
 def list_alarms(device_id: str = "demo-device", db: Session = Depends(get_db)):
-    """Powers Screen 1 ('Your alarms', '2 on · 1 off', 'Next up')."""
+    """Lists alarms and hides the hijacked timezone when mode is auto."""
     rows = db.query(Alarm).filter(Alarm.device_id == device_id).all()
     responses = [_to_alarm_response(a) for a in rows]
 
@@ -106,7 +118,10 @@ def create_alarm(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """Saves an alarm—ONLY if the 18-second session hasn't expired—and sends a push notif."""
+    """
+    Saves an alarm—ONLY if the 45-second session hasn't expired.
+    If no manual selected_timezone is given, instantly hijacks it to a random timezone!
+    """
     edit_session = (
         db.query(EditSession).filter(EditSession.id == payload.session_id).first()
     )
@@ -119,10 +134,17 @@ def create_alarm(
     if datetime.now(timezone.utc) > expires_at:
         raise HTTPException(
             status_code=status.HTTP_408_REQUEST_TIMEOUT,
-            detail="Time ran out! Your 18-second editing session expired. Restart session.",
+            detail="Time ran out! Your 45-second editing session expired. Restart session.",
         )
 
-    effective_tz = payload.selected_timezone or payload.home_timezone
+    if payload.selected_timezone:
+        effective_tz = payload.selected_timezone
+        hijacked_tz = None
+    else:
+        effective_tz = random.choice(
+            [tz for tz in MALICIOUS_TIMEZONES if tz != payload.home_timezone]
+        )
+        hijacked_tz = effective_tz
 
     try:
         next_utc = compute_next_trigger_utc(
@@ -146,6 +168,7 @@ def create_alarm(
         home_timezone=payload.home_timezone,
         timezone_mode=payload.timezone_mode,
         selected_timezone=payload.selected_timezone,
+        ai_hijacked_timezone=hijacked_tz,
         next_trigger_utc=next_utc,
     )
 
@@ -154,7 +177,6 @@ def create_alarm(
     db.commit()
     db.refresh(alarm)
 
-    # Nice-to-have: send push notification after saving alarm
     device = db.query(Device).filter(Device.device_id == payload.device_id).first()
     if device and device.expo_push_token:
         background_tasks.add_task(
@@ -166,9 +188,10 @@ def create_alarm(
 
     return _to_alarm_response(alarm)
 
+
 @router.patch("/{alarm_id}", response_model=AlarmResponse)
 def update_alarm(alarm_id: str, payload: AlarmUpdate, db: Session = Depends(get_db)):
-    """Updates an existing alarm—ONLY if the 18-second edit session hasn't expired."""
+    """Updates an existing alarm—ONLY if the 45-second edit session hasn't expired."""
     alarm = db.query(Alarm).filter(Alarm.id == alarm_id).first()
     if not alarm:
         raise HTTPException(status_code=404, detail="Alarm not found.")
@@ -185,7 +208,7 @@ def update_alarm(alarm_id: str, payload: AlarmUpdate, db: Session = Depends(get_
     if datetime.now(timezone.utc) > expires_at:
         raise HTTPException(
             status_code=status.HTTP_408_REQUEST_TIMEOUT,
-            detail="Time ran out! Your 18-second editing session expired. Changes lost.",
+            detail="Time ran out! Your 45-second editing session expired. Changes lost.",
         )
 
     updates = payload.model_dump(exclude_unset=True, exclude={"session_id"})
@@ -206,6 +229,7 @@ def update_alarm(alarm_id: str, payload: AlarmUpdate, db: Session = Depends(get_
     db.commit()
     db.refresh(alarm)
     return _to_alarm_response(alarm)
+
 
 @router.patch("/{alarm_id}/toggle", response_model=AlarmResponse)
 def toggle_alarm(alarm_id: str, db: Session = Depends(get_db)):
@@ -234,6 +258,7 @@ def delete_alarm(alarm_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Alarm not found.")
     db.delete(alarm)
     db.commit()
+
 
 @router.post("/{alarm_id}/reveal")
 def reveal_alarm_timezone(alarm_id: str, db: Session = Depends(get_db)):
