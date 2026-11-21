@@ -7,8 +7,54 @@ import { useSession } from '../../context/SessionContext';
 import { useTheme } from '../../context/ThemeContext';
 import { api, type BackendAlarm, type RevealResponse } from '../../services/api';
 
-const FALLBACK_SOLUTION = [1, 2, 3, 4, 3, 4, 1, 2, 2, 1, 4, 3, 4, 3, 2, 1];
-const FALLBACK_PUZZLE = [1, 0, 3, 0, 0, 4, 0, 2, 2, 0, 4, 0, 0, 3, 0, 1];
+const EMPTY_PUZZLE = Array<number>(16).fill(0);
+let lastFallbackPuzzle = '';
+
+function shuffled<T>(items: T[]) {
+  const result = [...items];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
+  }
+  return result;
+}
+
+function generateFallbackSudoku() {
+  const base = [
+    [1, 2, 3, 4],
+    [3, 4, 1, 2],
+    [2, 1, 4, 3],
+    [4, 3, 2, 1],
+  ];
+  let generated: { puzzle: number[]; solution: number[] } | undefined;
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const rows = [0, 1, 2, 3];
+    const columns = [0, 1, 2, 3];
+    const swap = (values: number[], left: number, right: number) => {
+      [values[left], values[right]] = [values[right], values[left]];
+    };
+    if (Math.random() < 0.5) swap(rows, 0, 1);
+    if (Math.random() < 0.5) swap(rows, 2, 3);
+    if (Math.random() < 0.5) { swap(rows, 0, 2); swap(rows, 1, 3); }
+    if (Math.random() < 0.5) swap(columns, 0, 1);
+    if (Math.random() < 0.5) swap(columns, 2, 3);
+    if (Math.random() < 0.5) { swap(columns, 0, 2); swap(columns, 1, 3); }
+    const digits = shuffled([1, 2, 3, 4]);
+    let solution = rows.map((row) => columns.map((column) => digits[base[row][column] - 1]));
+    if (Math.random() < 0.5) solution = solution[0].map((_, column) => solution.map((row) => row[column]));
+
+    const puzzle = solution.flat();
+    for (const index of shuffled([...Array(16).keys()]).slice(0, 6)) puzzle[index] = 0;
+    const signature = puzzle.join('');
+    generated = { puzzle, solution: solution.flat() };
+    if (signature !== lastFallbackPuzzle) {
+      lastFallbackPuzzle = signature;
+      return generated;
+    }
+  }
+  return generated!;
+}
 const CONFIRM_PROMPTS = [
   'Are you sure you want to change this alarm?',
   'Are you REALLY sure? Waking up is a big commitment.',
@@ -39,8 +85,9 @@ export default function AlarmsScreen() {
 
   const [ringing, setRinging] = useState(false);
   const [sudokuId, setSudokuId] = useState<string | null>(null);
-  const [puzzleMask, setPuzzleMask] = useState<number[]>(FALLBACK_PUZZLE);
-  const [grid, setGrid] = useState<number[]>(FALLBACK_PUZZLE);
+  const [puzzleMask, setPuzzleMask] = useState<number[]>(EMPTY_PUZZLE);
+  const [grid, setGrid] = useState<number[]>(EMPTY_PUZZLE);
+  const [fallbackSolution, setFallbackSolution] = useState<number[]>([]);
   const [activeCell, setActiveCell] = useState<number | null>(null);
   const [ringReveal, setRingReveal] = useState<RevealResponse | null>(null);
   const [ringStartedAt, setRingStartedAt] = useState<number | null>(null);
@@ -65,15 +112,18 @@ export default function AlarmsScreen() {
     setActiveCell(null);
     setRinging(true);
     try {
-      const challenge = await api.getSudoku();
+      const challenge = await api.getSudoku(6);
       const values = challenge.puzzle.flat().map((value) => value ?? 0);
       setSudokuId(challenge.challenge_id);
       setPuzzleMask(values);
       setGrid(values);
+      setFallbackSolution([]);
     } catch {
+      const fallback = generateFallbackSudoku();
       setSudokuId(null);
-      setPuzzleMask(FALLBACK_PUZZLE);
-      setGrid(FALLBACK_PUZZLE);
+      setPuzzleMask(fallback.puzzle);
+      setGrid(fallback.puzzle);
+      setFallbackSolution(fallback.solution);
     }
   }, []);
 
@@ -169,10 +219,13 @@ export default function AlarmsScreen() {
           } else showToast(result.message || 'That grid is valid, but it is not this puzzle’s solution.');
           return;
         } catch {
-          // The local fallback still validates the grid when the challenge service is unavailable.
+          // The local checks above match the server's row, column, box, and fixed-clue rules.
+          setRinging(false);
+          showToast('Sudoku solved. The alarm is quiet. For now.');
+          return;
         }
       }
-      if (next.every((cell, index) => cell === FALLBACK_SOLUTION[index])) {
+      if (next.every((cell, index) => cell === fallbackSolution[index])) {
         setRinging(false);
         showToast('Sudoku solved. The alarm is quiet. For now.');
       } else showToast('That grid is valid, but it is not this puzzle’s solution.');

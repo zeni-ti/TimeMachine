@@ -169,8 +169,8 @@ export const api = {
       body: JSON.stringify({ challenge_id: challengeId, selected_indices: selectedIndices }),
     }),
 
-  getSudoku: () =>
-    request<SudokuChallenge>('/challenges/sudoku'),
+  getSudoku: (blanks = 6) =>
+    request<SudokuChallenge>(`/challenges/sudoku?blanks=${blanks}`),
 
   verifySudoku: (challengeId: string, grid: number[][]) =>
     request<VerifyResponse>('/challenges/sudoku/verify', {
