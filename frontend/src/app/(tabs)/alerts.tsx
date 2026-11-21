@@ -16,7 +16,7 @@ type PendingAction = { alarm: BackendAlarm; kind: 'toggle' | 'delete' };
 
 export default function AlarmsScreen() {
   const { dark, toggleTheme } = useTheme();
-  const { alarms, refreshAlarms, revealedMap } = useAlarms();
+  const { alarms, refreshAlarms, revealedMap, removeAlarm } = useAlarms();
   const { seconds, setSeconds } = useSession();
   const [confirm, setConfirm] = useState<{ step: number; action: PendingAction } | null>(null);
   const [buttonSwap, setButtonSwap] = useState(false);
@@ -50,7 +50,10 @@ export default function AlarmsScreen() {
     setConfirm(null);
     try {
       if (action.kind === 'toggle') await api.toggleAlarm(action.alarm.id);
-      else await api.deleteAlarm(action.alarm.id);
+      else {
+        await api.deleteAlarm(action.alarm.id);
+        removeAlarm(action.alarm.id);
+      }
       await refreshAlarms();
       showNotice(action.kind === 'delete' ? 'Alarm deleted. Time will miss it.' : 'Alarm status updated. Probably.');
     } catch (error) {

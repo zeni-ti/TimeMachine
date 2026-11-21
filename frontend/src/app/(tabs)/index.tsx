@@ -39,7 +39,7 @@ export default function TodayScreen() {
   const { dark, toggleTheme } = useTheme();
   const { splashVisible } = useSplash();
   const { seconds, setSeconds } = useSession();
-  const { alarms, setAlarms, revealedMap, setRevealedMap, refreshAlarms } = useAlarms();
+  const { alarms, addAlarm, revealedMap, setRevealedMap, refreshAlarms } = useAlarms();
 
   const [now, setNow] = useState(() => Date.now());
 
@@ -249,9 +249,7 @@ export default function TodayScreen() {
           const session = await api.startSession();
           setSeconds(session.duration_seconds);
           const createdAlarm = await api.createAlarm(session.session_id, target24, homeTz);
-          setAlarms((current) => current.some((alarm) => alarm.id === createdAlarm.id)
-            ? current
-            : [createdAlarm, ...current]);
+          addAlarm(createdAlarm);
           showToast(`Alarm set for ${hour}:${minute} ${period}. All times are local. Sleep well.`);
           if (extraConfirmations > 0) {
             setSnoozeTax(0);
@@ -602,7 +600,7 @@ export default function TodayScreen() {
                 if (actionSwap) resetAlarmDraft();
                 else {
                   setActionSwap(true);
-                  showToast("You've been cursed. Your buttons have traded fates.", 3600);
+                  showToast('You are cursed. Something seems wrong.', 3600);
                 }
               }, true, { flex: 1 })}
               {btn('Cancel', () => {
