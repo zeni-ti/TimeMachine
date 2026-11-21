@@ -1,136 +1,322 @@
-import { useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  Modal, Pressable, ScrollView, StyleSheet, Text, View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Alarm, getRandomZone, useAlarms } from '../../context/AlarmContext';
-import { useSession } from '../../context/SessionContext';
+import { Switch } from '../../components/Switch';
 import { useTheme } from '../../context/ThemeContext';
+import { createAudioPlayer } from 'expo-audio';
+import {
+  api,
+  type BackendAlarm,
+  type RevealResponse,
+} from '../../services/api';
 
-const PROMPTS = [
-  'Are you sure you want to change this alarm?',
-  'Are you REALLY sure? It was doing perfectly fine.',
-  "Final check: you know this button won't snooze, right?",
-];
+const FALLBACK_SOLUTION = [1, 2, 3, 4, 3, 4, 1, 2, 2, 1, 4, 3, 4, 3, 2, 1];
+const FALLBACK_PUZZLE = [1, 0, 3, 0, 0, 4, 0, 2, 2, 0, 4, 0, 0, 3, 0, 1];
 
-export default function AlarmsScreen() {
-  const { dark, toggleTheme } = useTheme();
-  const { alarms, setAlarms } = useAlarms();
-  const { seconds, setSeconds } = useSession();
-  const [confirm, setConfirm] = useState<{ step: number; required: number; action: () => void } | null>(null);
-  const [buttonSwap, setButtonSwap] = useState(false);
+export default function AlertsScreen() {
+  const { dark } = useTheme();
+  const [alarms, setAlarms] = useState<BackendAlarm[]>([]);
+  const [revealedMap, setRevealedMap] = useState<Record<string, RevealResponse>>({});
   const [notice, setNotice] = useState('');
+
+  // Ringing & Sudoku state
+  const [ringing, setRinging] = useState(false);
+  const [sudokuId, setSudokuId] = useState<string | null>(null);
+  const [puzzleMask, setPuzzleMask] = useState<number[]>(FALLBACK_PUZZLE);
+  const [grid, setGrid] = useState<number[]>(FALLBACK_PUZZLE);
+  const [activeCell, setActiveCell] = useState<number | null>(null);
+  const [ringReveal, setRingReveal] = useState<RevealResponse | null>(null);
+  const [ringStartedAt, setRingStartedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
   const c = dark
     ? { bg: '#09090B', fg: '#FAFAFA', muted: '#9696A0', card: '#17171B', line: '#2B2B30', accent: '#93B4FF', accentBg: '#17213A', red: '#FF7777' }
     : { bg: '#F5F7FA', fg: '#191B20', muted: '#747984', card: '#FFFFFF', line: '#E6E8ED', accent: '#315FEA', accentBg: '#EEF2FF', red: '#D85656' };
 
-  const mistake = (message: string) => {
-    setSeconds((value) => Math.max(0, value - 5));
-    setNotice(message); setTimeout(() => setNotice(''), 2600);
+  const showToast = useCallback((message: string, duration = 2800) => {
+    setNotice(message);
+    setTimeout(() => setNotice(''), duration);
+  }, []);
+
+  const loadAlarms = useCallback(async () => {
+    try {
+      const data = await api.listAlarms();
+      setAlarms(data.alarms);
+    } catch {
+      showToast('Backend offline—check FastAPI on port 8000.');
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    let active = true;
+    api.listAlarms()
+      .then((data) => {
+        if (active) setAlarms(data.alarms);
+      })
+      .catch(() => {
+        if (active) showToast('Backend offline—check FastAPI on port 8000.');
+      });
+    return () => {
+      active = false;
+    };
+  }, [showToast]);
+  
+  const startRingingWithSudoku = useCallback(async (reveal: RevealResponse | null) => {
+    setRingReveal(reveal);
+    setRingStartedAt(Date.now());
+    setActiveCell(null);
+    setRinging(true);
+    try {
+      const s = await api.getSudoku();
+      const flat = s.puzzle.flat().map((v) => v ?? 0);
+      setSudokuId(s.challenge_id);
+      setPuzzleMask(flat);
+      setGrid(flat);
+    } catch {
+      setSudokuId(null);
+      setPuzzleMask(FALLBACK_PUZZLE);
+      setGrid(FALLBACK_PUZZLE);
+    }
+  }, []);
+
+  // Poll UTC trigger timestamps every 5 seconds
+  useEffect(() => {
+    const tick = setInterval(() => {
+      setNow(Date.now());
+      const currentMs = Date.now();
+      alarms.forEach((alarm) => {
+        if (!alarm.is_enabled || !alarm.next_trigger_utc || revealedMap[alarm.id]) return;
+        if (currentMs >= new Date(alarm.next_trigger_utc).getTime()) {
+          void (async () => {
+            try {
+              const reveal = await api.revealAlarm(alarm.id);
+              setRevealedMap((prev) => ({ ...prev, [alarm.id]: reveal }));
+              await api.toggleAlarm(alarm.id);
+              await loadAlarms();
+              await startRingingWithSudoku(reveal);
+            } catch {
+              await startRingingWithSudoku(null);
+            }
+          })();
+        }
+      });
+    }, 5000);
+    return () => clearInterval(tick);
+  }, [alarms, revealedMap, loadAlarms, startRingingWithSudoku]);
+
+  // Continuous Alarm Audio Loop
+  useEffect(() => {
+    let nativePlayer: any = null;
+    let webAudio: any = null;
+    let active = true;
+
+    async function playAudio() {
+      if (!ringing) return;
+      try {
+        const player = createAudioPlayer(require('../../../assets/alarm.mp3'));
+        player.loop = true;
+        player.volume = 1.0;
+        player.play();
+        if (active) nativePlayer = player;
+        else player.pause();
+      } catch {}
+    }
+
+    if (ringing) void playAudio();
+
+    return () => {
+      active = false;
+      if (nativePlayer) { try { nativePlayer.pause(); nativePlayer.remove?.(); } catch {} }
+      if (webAudio) { try { webAudio.pause(); } catch {} }
+    };
+  }, [ringing]);
+
+  const toggleAlarmSwitch = async (id: string) => {
+    try {
+      await api.toggleAlarm(id);
+      await loadAlarms();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Toggle failed');
+    }
   };
-  const beginConfirm = (action: () => void, extraConfirmations: number) => {
-    setConfirm({ step: 0, required: 3 + extraConfirmations, action });
-    setButtonSwap((value) => !value);
+
+  const deleteAlarmItem = async (id: string) => {
+    try {
+      await api.deleteAlarm(id);
+      await loadAlarms();
+      showToast('Alarm deleted.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Delete failed');
+    }
   };
-  const confirmNext = () => {
-    if (!confirm) return;
-    if (confirm.step < confirm.required - 1) {
-      setConfirm({ ...confirm, step: confirm.step + 1 }); setButtonSwap((value) => !value);
-    } else { confirm.action(); setConfirm(null); }
+
+  const enterDigit = async (value: number) => {
+    if (activeCell === null || puzzleMask[activeCell] !== 0) return;
+    const next = [...grid];
+    next[activeCell] = value;
+    setGrid(next);
+
+    if (next.every((n) => n !== 0)) {
+      if (sudokuId) {
+        const matrix = [
+          next.slice(0, 4),
+          next.slice(4, 8),
+          next.slice(8, 12),
+          next.slice(12, 16),
+        ];
+        try {
+          const res = await api.verifySudoku(sudokuId, matrix);
+          if (res.passed) {
+            setRinging(false);
+            showToast(res.message);
+          } else {
+            showToast(res.message);
+          }
+          return;
+        } catch {}
+      }
+      if (next.every((n, i) => n === FALLBACK_SOLUTION[i])) {
+        setRinging(false);
+      } else {
+        showToast('Not quite right! Check each row, column, and 2x2 box.');
+      }
+    }
   };
-  const toggleAlarm = (alarm: Alarm) => beginConfirm(
-    () => setAlarms((items) => items.map((item) => item.id === alarm.id
-      ? { ...item, enabled: !item.enabled, zone: getRandomZone() }
-      : item)),
-    alarm.extraConfirmations,
-  );
-  const deleteAlarm = (alarm: Alarm) => beginConfirm(
-    () => setAlarms((items) => items.filter((item) => item.id !== alarm.id)),
-    alarm.extraConfirmations,
-  );
-  const btn = (label: string, onPress: () => void, primary = false, danger = false) => (
-    <Pressable onPress={onPress} style={[styles.button, { backgroundColor: primary ? c.accent : c.card, borderColor: danger ? c.red : primary ? c.accent : c.line }]}>
-      <Text style={{ color: primary ? '#FFFFFF' : danger ? c.red : c.fg, fontSize: 13, fontWeight: '700' }}>{label}</Text>
-    </Pressable>
-  );
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
-      <View style={{ flex: 1, backgroundColor: c.bg }} onTouchEnd={toggleTheme}>
-        <ScrollView contentContainerStyle={styles.page} showsVerticalScrollIndicator={false}>
-          <View style={styles.header}>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.brand, { color: c.fg }]}>TIMEMACHINE<Text style={{ color: c.accent }}>.</Text></Text>
-              <Text style={[styles.eyebrow, { color: c.muted }]}>THE SCHEDULE, SUCH AS IT IS</Text>
-            </View>
-            <View style={[styles.session, { backgroundColor: c.card, borderColor: c.line }]}>
-              <Text style={{ color: c.red, fontSize: 12, fontWeight: '800' }}>00:{String(seconds).padStart(2, '0')}</Text>
-              <Text style={{ color: c.muted, fontSize: 8, marginTop: 3 }}>SESSION LEFT</Text>
-            </View>
-          </View>
-          <View style={styles.titleRow}>
-            <View><Text style={[styles.title, { color: c.fg }]}>Alarms</Text><Text style={{ color: c.muted, fontSize: 12, marginTop: 4 }}>A count of {alarms.length}. Accuracy may vary.</Text></View>
-            <Text style={[styles.count, { color: c.accent }]}>{String(alarms.length).padStart(2, '0')}</Text>
-          </View>
+    <SafeAreaView style={[styles.page, { backgroundColor: c.bg }]}>
+      <ScrollView contentContainerStyle={styles.content}>
+        <Text style={[styles.eyebrow, { color: c.accent }]}>Schedules & Timezones</Text>
+        <Text style={[styles.title, { color: c.fg }]}>Scheduled Alarms</Text>
 
-          {alarms.length === 0
-            ? <View style={[styles.empty, { backgroundColor: c.card, borderColor: c.line }]}><Text style={{ color: c.accent, fontSize: 29, marginRight: 14 }}>◷</Text><View><Text style={{ color: c.fg, fontWeight: '800', fontSize: 14 }}>No alarms. How peaceful.</Text><Text style={{ color: c.muted, fontSize: 11, marginTop: 5 }}>Set one from the Today tab. We&apos;ll make it complicated.</Text></View></View>
-            : alarms.map((alarm) => (
-              <View key={alarm.id} style={[styles.alarmCard, { backgroundColor: c.card, borderColor: c.line }]}>
-                <View style={styles.alarmHeader}>
-                  <View>
-                    <Text style={[styles.time, { color: c.fg }]}>{String(alarm.hour).padStart(2, '0')}:{String(alarm.minute).padStart(2, '0')}</Text>
-                    <Text style={{ color: alarm.enabled ? c.accent : c.muted, fontSize: 10, fontWeight: '800', marginTop: 3 }}>{alarm.enabled ? 'ARMED' : 'PAUSED'} · SNOOZE TAX +{alarm.extraConfirmations}</Text>
-                  </View>
-                  <View style={[styles.statusDot, { backgroundColor: alarm.enabled ? c.accent : c.muted }]} />
+        {alarms.length === 0 ? (
+          <View style={[styles.card, { backgroundColor: c.card, borderColor: c.line }]}>
+            <Text style={{ color: c.muted, textAlign: 'center', paddingVertical: 16 }}>No active alarms configured yet.</Text>
+          </View>
+        ) : (
+          alarms.map((alarm) => {
+            const revealed = revealedMap[alarm.id];
+            return (
+              <View key={alarm.id} style={[styles.card, { backgroundColor: c.card, borderColor: c.line }]}>
+                <View style={[styles.icon, { backgroundColor: c.accentBg }]}><Text style={styles.iconText}>⏰</Text></View>
+                <View style={styles.cardCopy}>
+                  <Text style={[styles.cardTitle, { color: c.fg }]}>{alarm.target_time} ({alarm.display_timezone})</Text>
+                  <Text style={[styles.cardSubtitle, { color: c.muted }]}>
+                    {alarm.is_enabled ? 'Active · Malicious timezone armed' : 'Paused'}
+                  </Text>
+                  {revealed && (
+                    <Text style={{ color: c.red, fontSize: 11, fontWeight: '700', marginTop: 4 }}>
+                      ⚠️ Rang in {revealed.utc_offset} {revealed.effective_timezone}!
+                    </Text>
+                  )}
                 </View>
-                <Text style={{ color: c.muted, fontSize: 12, marginTop: 9 }}>Assigned to somewhere on Earth. Allegedly.</Text>
-                {alarm.revealed && <Text style={{ color: c.muted, opacity: 0.6, fontSize: 9, marginTop: 6 }}>UTC{alarm.zone.offset >= 0 ? '+' : ''}{alarm.zone.offset} {alarm.zone.label} · Actual period: {alarm.period}</Text>}
-                <View style={styles.actions}>{btn(alarm.enabled ? 'Turn off' : 'Turn on', () => toggleAlarm(alarm), alarm.enabled)}{btn('Delete', () => deleteAlarm(alarm), false, true)}</View>
+                <Switch value={alarm.is_enabled} onChange={() => { void toggleAlarmSwitch(alarm.id); }} />
+                <Pressable onPress={() => { void deleteAlarmItem(alarm.id); }} style={styles.deleteBtn}>
+                  <Text style={{ color: c.red, fontSize: 12, fontWeight: '800' }}>✕</Text>
+                </Pressable>
               </View>
-            ))}
+            );
+          })
+        )}
 
-          <Text style={[styles.footer, { color: c.muted }]}>TIME IS A SUGGESTION.</Text>
-        </ScrollView>
-        {!!notice && <View pointerEvents="none" style={styles.toast}><Text style={styles.toastText}>{notice}</Text></View>}
+        {/* Demo Trigger for Judges */}
+        <Pressable
+          onPress={() => {
+            const firstActive = alarms.find((a) => a.is_enabled);
+            if (firstActive) {
+              void api.revealAlarm(firstActive.id).then((r) => startRingingWithSudoku(r)).catch(() => startRingingWithSudoku(null));
+            } else {
+              void startRingingWithSudoku(null);
+            }
+          }}
+          style={[styles.triggerButton, { backgroundColor: c.accentBg, borderColor: c.accent }]}
+        >
+          <Text style={[styles.triggerText, { color: c.accent }]}>▶ Trigger alarm & test Sudoku now</Text>
+        </Pressable>
+      </ScrollView>
 
-        <Modal visible={!!confirm} transparent animationType="fade" onRequestClose={() => setConfirm(null)}>
-          <View style={styles.scrim} onTouchEnd={toggleTheme}>
-            <View style={[styles.dialog, { backgroundColor: c.card }]}>
-              <Text style={[styles.modalKicker, { color: c.accent }]}>CONFIRMATION {String((confirm?.step ?? 0) + 1).padStart(2, '0')} / {String(confirm?.required ?? 3).padStart(2, '0')}</Text>
-              <Text style={[styles.modalTitle, { color: c.fg }]}>{confirm && confirm.step < PROMPTS.length ? PROMPTS[confirm.step] : 'Snooze tax: one more confirmation. You did this.'}</Text>
-              <Text style={{ color: c.muted, fontSize: 11, marginTop: 8 }}>This action has consequences. Mostly more questions.</Text>
-              <View style={[styles.actions, { flexDirection: buttonSwap ? 'row-reverse' : 'row', marginTop: 20 }]}>
-                {btn('Go back', () => { setConfirm(null); mistake('Wrong choice. Five seconds, please.'); })}
-                {btn(confirm && confirm.step === confirm.required - 1 ? 'I accept' : 'Confirm', confirmNext, true)}
-              </View>
+      {!!notice && <View pointerEvents="none" style={styles.toast}><Text style={styles.toastText}>{notice}</Text></View>}
+
+      {/* Ringing 4x4 Sudoku Modal */}
+      <Modal visible={ringing} transparent animationType="slide" onRequestClose={() => {}}>
+        <View style={styles.ringScrim}>
+          <View style={styles.ringDialog}>
+            <Text style={styles.ringKicker}>WAKE UP CALL</Text>
+            <Text style={styles.ringTitle}>Good morning.</Text>
+            <Text style={styles.ringCopy}>Silence is earned. Complete the grid.</Text>
+            {ringReveal && (
+              <Text style={{ color: '#FF8A79', fontSize: 11, fontWeight: '700', marginBottom: 12 }}>
+                Surprise! You were woken by {ringReveal.utc_offset} {ringReveal.effective_timezone}
+              </Text>
+            )}
+            <View style={styles.sudoku}>
+              {grid.map((value, i) => (
+                <Pressable
+                  key={i}
+                  onPress={() => setActiveCell(i)}
+                  style={[
+                    styles.sudokuCell,
+                    {
+                      borderColor: i % 4 === 1 ? '#697281' : '#353A44',
+                      borderRightWidth: i % 2 === 1 ? 2 : 1,
+                      borderBottomWidth: i > 7 ? 2 : 1,
+                      backgroundColor: activeCell === i ? '#243A58' : '#191D24',
+                    },
+                  ]}
+                >
+                  <Text style={{ color: puzzleMask[i] !== 0 ? '#F4F6F9' : '#91B1FF', fontSize: 21, fontWeight: '700' }}>
+                    {value || ''}
+                  </Text>
+                </Pressable>
+              ))}
             </View>
+            <View style={styles.numRow}>
+              {[1, 2, 3, 4].map((n) => (
+                <Pressable key={n} onPress={() => { void enterDigit(n); }} style={styles.numKey}>
+                  <Text style={styles.numText}>{n}</Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={styles.sudokuHint}>Every row. Every column. Every box.</Text>
+            {ringStartedAt && now - ringStartedAt > 30000 && (
+              <Pressable onPress={() => setRinging(false)} style={{ alignSelf: 'center', padding: 5, marginTop: 10 }}>
+                <Text style={{ color: '#888', fontSize: 10 }}>I give up, I&apos;m awake</Text>
+              </Pressable>
+            )}
           </View>
-        </Modal>
-      </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { paddingHorizontal: 22, paddingTop: 14, paddingBottom: 30 },
-  header: { flexDirection: 'row', alignItems: 'center' },
-  brand: { fontSize: 18, fontWeight: '900', letterSpacing: 1 },
-  eyebrow: { fontSize: 9, letterSpacing: 1.2, fontWeight: '700', marginTop: 4 },
-  session: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 11, paddingVertical: 8, alignItems: 'center', minWidth: 91 },
-  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 28, marginBottom: 15 },
-  title: { fontSize: 30, fontWeight: '900', letterSpacing: -0.7 },
-  count: { fontSize: 27, fontWeight: '800', fontVariant: ['tabular-nums'] },
-  empty: { minHeight: 88, borderWidth: 1, borderRadius: 17, padding: 16, flexDirection: 'row', alignItems: 'center' },
-  alarmCard: { borderWidth: 1, borderRadius: 18, padding: 17, marginBottom: 11 },
-  alarmHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  time: { fontSize: 29, lineHeight: 34, fontWeight: '900', letterSpacing: -0.7 },
-  statusDot: { width: 9, height: 9, borderRadius: 5 },
-  actions: { flexDirection: 'row', gap: 9, marginTop: 14 },
-  button: { minHeight: 42, paddingHorizontal: 14, borderWidth: 1, borderRadius: 11, justifyContent: 'center', alignItems: 'center', flex: 1 },
-  footer: { textAlign: 'center', marginTop: 23, fontSize: 9, letterSpacing: 1.5, fontWeight: '700' },
-  toast: { position: 'absolute', bottom: 18, left: 18, right: 18, backgroundColor: '#252932', borderRadius: 12, padding: 13, elevation: 9 },
+  page: { flex: 1 },
+  content: { paddingHorizontal: 24, paddingTop: 18, paddingBottom: 40 },
+  eyebrow: { fontSize: 13, fontWeight: '700', letterSpacing: 0.8, textTransform: 'uppercase' },
+  title: { fontSize: 32, fontWeight: '800', marginTop: 5, marginBottom: 24 },
+  card: { minHeight: 92, borderRadius: 20, borderWidth: 1, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  icon: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  iconText: { fontSize: 20 },
+  cardCopy: { flex: 1, marginLeft: 12 },
+  cardTitle: { fontSize: 15, fontWeight: '800' },
+  cardSubtitle: { fontSize: 12, marginTop: 4 },
+  deleteBtn: { marginLeft: 10, padding: 8 },
+  triggerButton: { marginTop: 18, height: 56, borderRadius: 16, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  triggerText: { fontSize: 14, fontWeight: '800' },
+  toast: { position: 'absolute', bottom: 20, left: 18, right: 18, backgroundColor: '#252932', borderRadius: 12, padding: 13, elevation: 9 },
   toastText: { color: '#FFFFFF', fontSize: 12, textAlign: 'center', fontWeight: '600' },
-  scrim: { flex: 1, backgroundColor: '#080B12B8', justifyContent: 'center', padding: 22 },
-  dialog: { borderRadius: 22, padding: 20, maxWidth: 460, width: '100%', alignSelf: 'center' },
-  modalKicker: { fontSize: 10, fontWeight: '800', letterSpacing: 1.2 },
-  modalTitle: { fontSize: 20, fontWeight: '800', lineHeight: 27, marginTop: 8 },
+  ringScrim: { flex: 1, backgroundColor: '#07090DEB', justifyContent: 'center', padding: 22 },
+  ringDialog: { backgroundColor: '#10141B', borderRadius: 24, padding: 22, alignItems: 'center', borderWidth: 1, borderColor: '#303844' },
+  ringKicker: { color: '#FF8A79', fontSize: 10, letterSpacing: 2, fontWeight: '800' },
+  ringTitle: { color: '#FFFFFF', fontSize: 31, fontWeight: '900', marginTop: 5 },
+  ringCopy: { color: '#ABB3C0', fontSize: 13, marginTop: 6, marginBottom: 18 },
+  sudoku: { width: 240, height: 240, flexDirection: 'row', flexWrap: 'wrap', borderWidth: 2, borderColor: '#697281' },
+  sudokuCell: { width: '25%', height: '25%', justifyContent: 'center', alignItems: 'center', borderWidth: 1 },
+  numRow: { flexDirection: 'row', gap: 10, marginTop: 15 },
+  numKey: { width: 48, height: 42, backgroundColor: '#26364F', borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
+  numText: { color: '#FFFFFF', fontSize: 18, fontWeight: '800' },
+  sudokuHint: { color: '#798392', fontSize: 10, marginTop: 12 },
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   BackHandler, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
@@ -8,14 +8,10 @@ import { useSplash } from '../../context/SplashContext';
 import { useSession } from '../../context/SessionContext';
 import {
   api,
-  type BackendAlarm,
   type CaptchaChallenge,
   type CheckinQuestionResponse,
-  type RevealResponse,
 } from '../../services/api';
 
-const FALLBACK_SOLUTION = [1, 2, 3, 4, 3, 4, 1, 2, 2, 1, 4, 3, 4, 3, 2, 1];
-const FALLBACK_PUZZLE = [1, 0, 3, 0, 0, 4, 0, 2, 2, 0, 4, 0, 0, 3, 0, 1];
 const PROMPTS = [
   'Are you sure you want to set this alarm?',
   'Are you REALLY sure? Waking up is a big commitment.',
@@ -41,7 +37,7 @@ export default function TodayScreen() {
   const [now, setNow] = useState(() => Date.now());
   const [sessionId, setSessionId] = useState<string | null>(null);
 
-  // Calculator & time state (team features)
+  // Calculator & time state
   const [hour, setHour] = useState('07');
   const [minute, setMinute] = useState('30');
   const [period, setPeriod] = useState<'AM' | 'PM'>('AM');
@@ -50,11 +46,7 @@ export default function TodayScreen() {
   const [calcBuffer, setCalcBuffer] = useState('');
   const [snoozeTax, setSnoozeTax] = useState(INITIAL_SNOOZE_TAX);
 
-  // Alarms & backend state
-  const [alarms, setAlarms] = useState<BackendAlarm[]>([]);
-  const [revealedMap, setRevealedMap] = useState<Record<string, RevealResponse>>({});
-
-  // CAPTCHA state (backend missing-digit troll challenge)
+  // CAPTCHA state
   const [captchaModal, setCaptchaModal] = useState(false);
   const [captchaChallenge, setCaptchaChallenge] = useState<CaptchaChallenge | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
@@ -64,21 +56,10 @@ export default function TodayScreen() {
   const [confirm, setConfirm] = useState<{ step: number; required: number; action: () => void } | null>(null);
   const [buttonSwap, setButtonSwap] = useState(false);
 
-  // Ringing & Sudoku state
-  const [ringing, setRinging] = useState(false);
-  const [sudokuId, setSudokuId] = useState<string | null>(null);
-  const [puzzleMask, setPuzzleMask] = useState<number[]>(FALLBACK_PUZZLE);
-  const [grid, setGrid] = useState<number[]>(FALLBACK_PUZZLE);
-  const [activeCell, setActiveCell] = useState<number | null>(null);
-  const [ringReveal, setRingReveal] = useState<RevealResponse | null>(null);
-  const [ringStartedAt, setRingStartedAt] = useState<number | null>(null);
-
   // AI Check-in state
   const [aiModal, setAiModal] = useState(false);
   const [aiCheckin, setAiCheckin] = useState<CheckinQuestionResponse | null>(null);
   const [aiReplyInput, setAiReplyInput] = useState('');
-
-  const audioRef = useRef<{ close?: () => void } | null>(null);
 
   const c = dark
     ? { bg: '#09090B', fg: '#FAFAFA', muted: '#9696A0', card: '#17171B', line: '#2B2B30', accent: '#93B4FF', accentBg: '#17213A', red: '#FF7777', hero: '#171B24' }
@@ -94,26 +75,14 @@ export default function TodayScreen() {
     showToast(message, 2600);
   }, [setSeconds, showToast]);
 
-  const refreshBackendState = useCallback(async () => {
-    try {
-      const [session, list] = await Promise.all([api.startSession(), api.listAlarms()]);
-      setSessionId(session.session_id);
-      setSeconds(session.duration_seconds);
-      setAlarms(list.alarms);
-    } catch {
-      showToast('Backend offline—check FastAPI on port 8000.');
-    }
-  }, [setSeconds, showToast]);
-
-  // Initial load
+  // Initial load session
   useEffect(() => {
     let active = true;
-    Promise.all([api.startSession(), api.listAlarms()])
-      .then(([session, list]) => {
+    api.startSession()
+      .then((session) => {
         if (!active) return;
         setSessionId(session.session_id);
         setSeconds(session.duration_seconds);
-        setAlarms(list.alarms);
       })
       .catch(() => {
         if (active) showToast('Backend offline—check FastAPI on port 8000.');
@@ -128,9 +97,7 @@ export default function TodayScreen() {
     if (Platform.OS !== 'web' || typeof globalThis.localStorage === 'undefined') return;
     try {
       globalThis.localStorage.setItem(SNOOZE_TAX_STORAGE_KEY, String(snoozeTax));
-    } catch {
-      // Storage unavailable in private browsing
-    }
+    } catch {}
   }, [snoozeTax]);
 
   // Session countdown timer
@@ -146,7 +113,7 @@ export default function TodayScreen() {
           setPeriodCommitted(false);
           setEditPart(null);
           setCalcBuffer('');
-          showToast(`Session expired! Your alarm draft was wiped, but your Snooze Tax of ${snoozeTax} carried over.`, 3500);
+          showToast(`Session expired! Alarm draft wiped, Snooze Tax of ${snoozeTax} kept.`, 3500);
           void api.startSession().then((s) => setSessionId(s.session_id)).catch(() => {});
           return 45;
         }
@@ -154,89 +121,7 @@ export default function TodayScreen() {
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [setSeconds, showToast, snoozeTax, splashVisible]);
-
-  const startRingingWithSudoku = useCallback(async (reveal: RevealResponse | null) => {
-    setRingReveal(reveal);
-    setRingStartedAt(Date.now());
-    setActiveCell(null);
-    setRinging(true);
-    try {
-      const s = await api.getSudoku();
-      const flat = s.puzzle.flat().map((v) => v ?? 0);
-      setSudokuId(s.challenge_id);
-      setPuzzleMask(flat);
-      setGrid(flat);
-    } catch {
-      setSudokuId(null);
-      setPuzzleMask(FALLBACK_PUZZLE);
-      setGrid(FALLBACK_PUZZLE);
-    }
-  }, []);
-
-  // Poll UTC trigger timestamps every 5 seconds
-  useEffect(() => {
-    const tick = setInterval(() => {
-      const currentMs = Date.now();
-      alarms.forEach((alarm) => {
-        if (!alarm.is_enabled || !alarm.next_trigger_utc || revealedMap[alarm.id]) return;
-        if (currentMs >= new Date(alarm.next_trigger_utc).getTime()) {
-          void (async () => {
-            try {
-              const reveal = await api.revealAlarm(alarm.id);
-              setRevealedMap((prev) => ({ ...prev, [alarm.id]: reveal }));
-              await api.toggleAlarm(alarm.id);
-              const list = await api.listAlarms();
-              setAlarms(list.alarms);
-              await startRingingWithSudoku(reveal);
-            } catch {
-              await startRingingWithSudoku(null);
-            }
-          })();
-        }
-      });
-    }, 5000);
-    return () => clearInterval(tick);
-  }, [alarms, revealedMap, startRingingWithSudoku]);
-
-  // Ringing buzzer (web / compatible runtimes)
-  useEffect(() => {
-    if (!ringing) {
-      audioRef.current?.close?.();
-      audioRef.current = null;
-      return;
-    }
-    const g = globalThis as typeof globalThis & { AudioContext?: new () => any; webkitAudioContext?: new () => any };
-    const AudioCtor = g.AudioContext ?? g.webkitAudioContext;
-    if (AudioCtor) {
-      try {
-        const ctx = new AudioCtor();
-        audioRef.current = ctx;
-        let step = 0;
-        const play = () => {
-          if (ctx.state === 'suspended') void ctx.resume();
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'square';
-          osc.frequency.value = step++ % 2 ? 740 : 520;
-          gain.gain.value = 0.035;
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start();
-          osc.stop(ctx.currentTime + 0.16);
-        };
-        play();
-        const id = setInterval(play, 420);
-        return () => {
-          clearInterval(id);
-          void ctx.close();
-          audioRef.current = null;
-        };
-      } catch {
-        // Audio unavailable on some native runtimes
-      }
-    }
-  }, [ringing]);
+  }, [showToast, snoozeTax, splashVisible, seconds, setSeconds]);
 
   const loadCaptcha = async () => {
     if (!editPart) {
@@ -283,46 +168,13 @@ export default function TodayScreen() {
           const activeSessionId = sessionId ?? (await api.startSession()).session_id;
           await api.createAlarm(activeSessionId, target24, homeTz);
           showToast(`Alarm set for ${hour}:${minute} ${period}. All times are local. Sleep well.`);
-          if (extraConfirmations > 0) {
-            setSnoozeTax(0);
-            if (Platform.OS === 'web' && typeof globalThis.localStorage !== 'undefined') {
-              try { globalThis.localStorage.removeItem(SNOOZE_TAX_STORAGE_KEY); } catch {}
-            }
-          }
-          await refreshBackendState();
+          if (extraConfirmations > 0) setSnoozeTax(0);
         } catch (err) {
           showToast(err instanceof Error ? err.message : 'Could not save alarm');
-          await refreshBackendState();
         }
       })();
     }, extraConfirmations);
   };
-
-  const toggleAlarm = (id: string) =>
-    beginConfirm(() => {
-      void (async () => {
-        try {
-          await api.toggleAlarm(id);
-          const list = await api.listAlarms();
-          setAlarms(list.alarms);
-        } catch (err) {
-          showToast(err instanceof Error ? err.message : 'Toggle failed');
-        }
-      })();
-    });
-
-  const deleteAlarm = (id: string) =>
-    beginConfirm(() => {
-      void (async () => {
-        try {
-          await api.deleteAlarm(id);
-          const list = await api.listAlarms();
-          setAlarms(list.alarms);
-        } catch (err) {
-          showToast(err instanceof Error ? err.message : 'Delete failed');
-        }
-      })();
-    });
 
   const chooseTimePart = (part: 'hour' | 'minute') => {
     setEditPart(part);
@@ -332,7 +184,7 @@ export default function TodayScreen() {
 
   const setTimePart = (value: string) => {
     if (!editPart) {
-      mistake('Choose H or M first. The keypad cannot read your mind.');
+      mistake('Choose H or M first.');
       return;
     }
     const max = editPart === 'hour' ? 12 : 59;
@@ -347,7 +199,7 @@ export default function TodayScreen() {
 
   const pressDigit = (digit: string) => {
     if (!editPart) {
-      mistake('Press H or M before entering digits. The calculator insists.');
+      mistake('Press H or M before entering digits.');
       return;
     }
     const next = `${calcBuffer}${digit}`.slice(-2);
@@ -358,7 +210,7 @@ export default function TodayScreen() {
   const pressOperator = (operator: string) => {
     if (operator === 'AC') {
       if (Platform.OS === 'android') BackHandler.exitApp();
-      else showToast('AC tried to leave. Use your device controls to exit.');
+      else showToast('AC tried to leave.');
     } else if (operator === '%') {
       let deleted = false;
       if (editPart) {
@@ -372,24 +224,16 @@ export default function TodayScreen() {
         }
       }
       setSnoozeTax((v) => v + 1);
-      showToast(deleted ? 'Typo detected. Deleting a digit costs +1 Snooze Tax.' : 'Nothing to delete, charged you +1 Snooze Tax anyway.');
+      showToast(deleted ? 'Typo detected. Deleting costs +1 Snooze Tax.' : 'Charged +1 Snooze Tax anyway.');
     } else if (operator === 'DEL') {
-      if (!editPart) {
-        mistake('Select H or M before deleting. Nothing is safe.');
-        return;
-      }
+      if (!editPart) { mistake('Select H or M before deleting.'); return; }
       const next = calcBuffer.slice(0, -1);
       setCalcBuffer(next);
       setTimePart(next || '0');
     } else if (operator === '×') {
-      setHour('00');
-      setMinute('00');
-      setPeriod('AM');
-      setPeriodCommitted(false);
-      setCalcBuffer('');
-      setEditPart(null);
+      setHour('00'); setMinute('00'); setPeriod('AM'); setPeriodCommitted(false); setCalcBuffer(''); setEditPart(null);
       setSnoozeTax((v) => v + 1);
-      showToast("Time cleared. Your emotional baggage (and Snooze Tax) remains—plus +1 Indecision Fee.");
+      showToast('Time cleared. Snooze Tax +1.');
     } else if (operator === 'H') {
       chooseTimePart('hour');
     } else if (operator === 'M') {
@@ -413,21 +257,11 @@ export default function TodayScreen() {
       setPeriodCommitted(false);
       setSnoozeTax((v) => v + 1);
       setCalcBuffer('');
-      showToast(`Chaos added +${added >= 60 ? `${added / 60}h` : `${added}m`}. Snooze tax +1.`);
+      showToast(`Chaos added +${added}m. Snooze tax +1.`);
     } else {
-      mistake(`${operator} applied to your morning. Somehow.`);
+      mistake(`${operator} applied to your morning.`);
       setCalcBuffer('');
     }
-  };
-
-  const resetDemoDebt = () => {
-    setSnoozeTax(0);
-    if (Platform.OS === 'web' && typeof globalThis.localStorage !== 'undefined') {
-      try {
-        globalThis.localStorage.removeItem(SNOOZE_TAX_STORAGE_KEY);
-      } catch {}
-    }
-    showToast('Demo debt forgiven. Try not to celebrate too loudly.');
   };
 
   const verifyCaptcha = async () => {
@@ -443,41 +277,6 @@ export default function TodayScreen() {
       }
     } catch (err) {
       mistake(err instanceof Error ? err.message : 'CAPTCHA failed');
-    }
-  };
-
-  const enterDigit = async (value: number) => {
-    if (activeCell === null || puzzleMask[activeCell] !== 0) return;
-    const next = [...grid];
-    next[activeCell] = value;
-    setGrid(next);
-
-    if (next.every((n) => n !== 0)) {
-      if (sudokuId) {
-        const matrix = [
-          next.slice(0, 4),
-          next.slice(4, 8),
-          next.slice(8, 12),
-          next.slice(12, 16),
-        ];
-        try {
-          const res = await api.verifySudoku(sudokuId, matrix);
-          if (res.passed) {
-            setRinging(false);
-            showToast(res.message);
-          } else {
-            showToast(res.message);
-          }
-          return;
-        } catch {
-          // Fall through to offline check
-        }
-      }
-      if (next.every((n, i) => n === FALLBACK_SOLUTION[i])) {
-        setRinging(false);
-      } else {
-        showToast('Not quite right! Check each row, column, and 2x2 box.');
-      }
     }
   };
 
@@ -498,8 +297,6 @@ export default function TodayScreen() {
       const res = await api.replyAiQuestion(aiCheckin.checkin_id, aiReplyInput.trim());
       setAiModal(false);
       showToast(res.innocent_reply, 3500);
-      const list = await api.listAlarms();
-      setAlarms(list.alarms);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'AI reply failed');
     }
@@ -649,41 +446,6 @@ export default function TodayScreen() {
           </View>
 
           <View style={styles.sectionHeading}>
-            <Text style={[styles.heading, { color: c.fg }]}>Scheduled</Text>
-            <Text style={[styles.sectionMeta, { color: c.muted }]}>{String(alarms.length).padStart(2, '0')} ALARMS</Text>
-          </View>
-          {alarms.length === 0 ? (
-            <View style={[styles.emptyCard, { backgroundColor: c.card, borderColor: c.line }]}>
-              <Text style={[styles.emptyIcon, { color: c.accent }]}>◷</Text>
-              <View>
-                <Text style={[styles.emptyTitle, { color: c.fg }]}>Nothing set. For now.</Text>
-                <Text style={[styles.helper, { color: c.muted }]}>Your future self is cautiously optimistic.</Text>
-              </View>
-            </View>
-          ) : (
-            alarms.map((alarm) => {
-              const revealed = revealedMap[alarm.id];
-              return (
-                <View key={alarm.id} style={[styles.alarmRow, { backgroundColor: c.card, borderColor: c.line }]}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.alarmTime, { color: c.fg }]}>{alarm.target_time}</Text>
-                    <Text style={{ color: c.muted, fontSize: 12, marginTop: 3 }}>
-                      {alarm.is_enabled ? `${alarm.display_timezone} (auto)` : 'Paused'}
-                    </Text>
-                    {revealed && (
-                      <Text style={{ color: c.muted, opacity: 0.7, fontSize: 9, marginTop: 4 }}>
-                        Actually rang in {revealed.utc_offset} {revealed.effective_timezone}
-                      </Text>
-                    )}
-                  </View>
-                  {btn(alarm.is_enabled ? 'On' : 'Off', () => toggleAlarm(alarm.id), alarm.is_enabled)}
-                  {btn('Delete', () => deleteAlarm(alarm.id))}
-                </View>
-              );
-            })
-          )}
-
-          <View style={styles.sectionHeading}>
             <Text style={[styles.heading, { color: c.fg }]}>Daily check-in</Text>
             <Text style={[styles.sectionMeta, { color: c.muted }]}>02 / AI PERSONA</Text>
           </View>
@@ -696,33 +458,7 @@ export default function TodayScreen() {
             <Text style={{ color: c.accent, fontSize: 20 }}>↗</Text>
           </Pressable>
 
-          <View style={styles.sectionHeading}>
-            <Text style={[styles.heading, { color: c.fg }]}>For the judges</Text>
-            <Text style={[styles.sectionMeta, { color: c.muted }]}>03 / DEMO</Text>
-          </View>
-          <Pressable
-            onPress={() => {
-              const firstActive = alarms.find((a) => a.is_enabled);
-              if (firstActive) {
-                void api.revealAlarm(firstActive.id).then((r) => startRingingWithSudoku(r)).catch(() => startRingingWithSudoku(null));
-              } else {
-                void startRingingWithSudoku(null);
-              }
-            }}
-            style={[styles.trigger, { backgroundColor: c.accentBg, borderColor: c.accent }]}
-          >
-            <View style={[styles.triggerIcon, { backgroundColor: c.accent }]}><Text style={{ color: '#FFF', fontSize: 18 }}>▶</Text></View>
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: c.fg, fontWeight: '800', fontSize: 15 }}>Trigger alarm now</Text>
-              <Text style={{ color: c.muted, fontSize: 12, marginTop: 4 }}>Test your morning resolve</Text>
-            </View>
-            <Text style={{ color: c.accent, fontSize: 20 }}>↗</Text>
-          </Pressable>
-
           <Text style={[styles.footer, { color: c.muted }]}>DESIGNED TO GET YOU UP. EVENTUALLY.</Text>
-          <Pressable onPress={resetDemoDebt} hitSlop={8} style={{ alignSelf: 'center', paddingVertical: 8, paddingHorizontal: 10 }}>
-            <Text style={{ color: c.muted, opacity: 0.42, fontSize: 9 }}>Reset Demo Debt</Text>
-          </Pressable>
         </ScrollView>
 
         {!!notice && <View pointerEvents="none" style={styles.toast}><Text style={styles.toastText}>{notice}</Text></View>}
@@ -796,56 +532,6 @@ export default function TodayScreen() {
             </View>
           </View>
         </Modal>
-
-        {/* Ringing 4x4 Sudoku Modal */}
-        <Modal visible={ringing} transparent animationType="slide" onRequestClose={() => {}}>
-          <View style={styles.ringScrim} onTouchEnd={toggleTheme}>
-            <View style={styles.ringDialog}>
-              <Text style={styles.ringKicker}>WAKE UP CALL</Text>
-              <Text style={styles.ringTitle}>Good morning.</Text>
-              <Text style={styles.ringCopy}>Silence is earned. Complete the grid.</Text>
-              {ringReveal && (
-                <Text style={{ color: '#8A93A2', fontSize: 10, marginBottom: 10 }}>
-                  Assigned to {ringReveal.utc_offset} {ringReveal.effective_timezone}
-                </Text>
-              )}
-              <View style={styles.sudoku}>
-                {grid.map((value, i) => (
-                  <Pressable
-                    key={i}
-                    onPress={() => setActiveCell(i)}
-                    style={[
-                      styles.sudokuCell,
-                      {
-                        borderColor: i % 4 === 1 ? '#697281' : '#353A44',
-                        borderRightWidth: i % 2 === 1 ? 2 : 1,
-                        borderBottomWidth: i > 7 ? 2 : 1,
-                        backgroundColor: activeCell === i ? '#243A58' : '#191D24',
-                      },
-                    ]}
-                  >
-                    <Text style={{ color: puzzleMask[i] !== 0 ? '#F4F6F9' : '#91B1FF', fontSize: 21, fontWeight: '700' }}>
-                      {value || ''}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-              <View style={styles.numRow}>
-                {[1, 2, 3, 4].map((n) => (
-                  <Pressable key={n} onPress={() => { void enterDigit(n); }} style={styles.numKey}>
-                    <Text style={styles.numText}>{n}</Text>
-                  </Pressable>
-                ))}
-              </View>
-              <Text style={styles.sudokuHint}>Every row. Every column. Every box.</Text>
-              {ringStartedAt && now - ringStartedAt > 30000 && (
-                <Pressable onPress={() => setRinging(false)} style={{ alignSelf: 'center', padding: 5, marginTop: 6 }}>
-                  <Text style={{ color: '#5C6068', fontSize: 9 }}>I give up, I&apos;m awake</Text>
-                </Pressable>
-              )}
-            </View>
-          </View>
-        </Modal>
       </View>
     </SafeAreaView>
   );
@@ -887,13 +573,6 @@ const styles = StyleSheet.create({
   helper: { fontSize: 11, marginTop: 7 },
   actionRow: { flexDirection: 'row', gap: 9, marginTop: 15 },
   button: { minHeight: 44, paddingHorizontal: 13, borderWidth: 1, borderRadius: 11, justifyContent: 'center', alignItems: 'center' },
-  emptyCard: { borderWidth: 1, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center' },
-  emptyIcon: { fontSize: 30, marginRight: 13 },
-  emptyTitle: { fontSize: 14, fontWeight: '700' },
-  alarmRow: { borderWidth: 1, borderRadius: 16, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 8 },
-  alarmTime: { fontSize: 22, fontWeight: '800' },
-  trigger: { borderWidth: 1, borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
-  triggerIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   footer: { textAlign: 'center', letterSpacing: 1.2, fontSize: 9, marginTop: 25 },
   toast: { position: 'absolute', bottom: 20, left: 18, right: 18, backgroundColor: '#252932', borderRadius: 12, padding: 13, elevation: 9 },
   toastText: { color: '#FFFFFF', fontSize: 12, textAlign: 'center', fontWeight: '600' },
@@ -904,15 +583,6 @@ const styles = StyleSheet.create({
   aiInput: { borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, marginTop: 16 },
   tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, justifyContent: 'center' },
   tile: { width: '31%', aspectRatio: 1, borderWidth: 1, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
-  ringScrim: { flex: 1, backgroundColor: '#07090DEB', justifyContent: 'center', padding: 22 },
-  ringDialog: { backgroundColor: '#10141B', borderRadius: 24, padding: 22, alignItems: 'center', borderWidth: 1, borderColor: '#303844' },
-  ringKicker: { color: '#FF8A79', fontSize: 10, letterSpacing: 2, fontWeight: '800' },
-  ringTitle: { color: '#FFFFFF', fontSize: 31, fontWeight: '900', marginTop: 5 },
-  ringCopy: { color: '#ABB3C0', fontSize: 13, marginTop: 6, marginBottom: 18 },
-  sudoku: { width: 240, height: 240, flexDirection: 'row', flexWrap: 'wrap', borderWidth: 2, borderColor: '#697281' },
-  sudokuCell: { width: '25%', height: '25%', justifyContent: 'center', alignItems: 'center', borderWidth: 1 },
-  numRow: { flexDirection: 'row', gap: 10, marginTop: 15 },
-  numKey: { width: 48, height: 42, backgroundColor: '#26364F', borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
-  numText: { color: '#FFFFFF', fontSize: 18, fontWeight: '800' },
-  sudokuHint: { color: '#798392', fontSize: 10, marginTop: 12 },
+  trigger: { borderWidth: 1, borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  triggerIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
 });
