@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
+  Modal, Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -27,6 +27,8 @@ export default function TodayScreen() {
   const [seconds, setSeconds] = useState(45);
   const [hour, setHour] = useState('07');
   const [minute, setMinute] = useState('30');
+  const [editPart, setEditPart] = useState<'hour' | 'minute'>('hour');
+  const [calcBuffer, setCalcBuffer] = useState('');
   const [alarms, setAlarms] = useState<Alarm[]>([]);
   const [captcha, setCaptcha] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
@@ -118,6 +120,26 @@ export default function TodayScreen() {
   };
   const toggleAlarm = (id: number) => beginConfirm(() => setAlarms((items) => items.map((a) => a.id === id ? { ...a, enabled: !a.enabled, zone: randomZone() } : a)));
   const deleteAlarm = (id: number) => beginConfirm(() => setAlarms((items) => items.filter((a) => a.id !== id)));
+  const chooseTimePart = (part: 'hour' | 'minute') => { setEditPart(part); setCalcBuffer(''); };
+  const setTimePart = (value: string) => {
+    const max = editPart === 'hour' ? 23 : 59;
+    const normalized = String(Math.min(max, Number(value) || 0)).padStart(2, '0');
+    if (editPart === 'hour') setHour(normalized); else setMinute(normalized);
+    setAlarms((items) => items.map((alarm) => ({ ...alarm, zone: randomZone() })));
+  };
+  const pressDigit = (digit: string) => {
+    const next = `${calcBuffer}${digit}`.slice(-2);
+    setCalcBuffer(next);
+    setTimePart(next);
+  };
+  const pressOperator = (operator: string) => {
+    if (operator === 'AC') { setCalcBuffer(''); setTimePart('0'); }
+    else if (operator === 'DEL') { const next = calcBuffer.slice(0, -1); setCalcBuffer(next); setTimePart(next); }
+    else if (operator === 'H') chooseTimePart('hour');
+    else if (operator === 'M') chooseTimePart('minute');
+    else if (operator === '=') openCaptcha();
+    else { mistake(`${operator} applied to your morning. Somehow.`); setCalcBuffer(''); }
+  };
   const verifyCaptcha = () => {
     if (attempts >= 2) { setCaptcha(false); setNotice('Verification passed. Probably.'); createAlarm(); }
     else if (selected.length) { mistake('Please try again'); setSelected([]); setAttempts((v) => v + 1); }
@@ -160,14 +182,27 @@ export default function TodayScreen() {
 
           <View style={styles.sectionHeading}><Text style={[styles.heading, { color: c.fg }]}>The alarm</Text><Text style={[styles.sectionMeta, { color: c.muted }]}>01 / CONFIGURE</Text></View>
           <View style={[styles.card, { backgroundColor: c.card, borderColor: c.line }]}>
-            <Text style={[styles.label, { color: c.muted }]}>WAKE UP AT</Text>
-            <View style={styles.timeRow}>
-              <TextInput accessibilityLabel="Alarm hour" keyboardType="number-pad" maxLength={2} value={hour} onChangeText={(v) => { setHour(v.replace(/\D/g, '').slice(-2)); setAlarms((a) => a.map((x) => ({ ...x, zone: randomZone() }))); }} style={[styles.timeInput, { color: c.fg, backgroundColor: c.bg, borderColor: c.line }]} />
-              <Text style={[styles.colon, { color: c.muted }]}>:</Text>
-              <TextInput accessibilityLabel="Alarm minute" keyboardType="number-pad" maxLength={2} value={minute} onChangeText={(v) => { setMinute(v.replace(/\D/g, '').slice(-2)); setAlarms((a) => a.map((x) => ({ ...x, zone: randomZone() }))); }} style={[styles.timeInput, { color: c.fg, backgroundColor: c.bg, borderColor: c.line }]} />
-              <View style={{ flex: 1 }} /><Text style={[styles.amPm, { color: c.muted }]}>24H</Text>
+            <View style={styles.calcTop}>
+              <View><Text style={[styles.label, { color: c.muted }]}>WAKE TIME / INPUT VALUE</Text><Text style={[styles.calcSub, { color: c.muted }]}>MODE: {editPart === 'hour' ? 'HOUR' : 'MINUTE'} · BASE 60</Text></View>
+              <Text style={[styles.calcMemory, { color: c.accent }]}>M+</Text>
             </View>
-            <Text style={[styles.helper, { color: c.muted }]}>Tap a time. We&apos;ll put it somewhere.</Text>
+            <View style={[styles.calcDisplay, { backgroundColor: dark ? '#09090B' : '#F2F4F7', borderColor: c.line }]}>
+              <Pressable onPress={() => chooseTimePart('hour')} style={[styles.calcValue, editPart === 'hour' && { borderBottomColor: c.accent, borderBottomWidth: 2 }]}><Text style={[styles.calcDigits, { color: c.fg }]}>{hour}</Text><Text style={[styles.calcUnit, { color: c.muted }]}>HRS</Text></Pressable>
+              <Text style={[styles.calcColon, { color: c.muted }]}>:</Text>
+              <Pressable onPress={() => chooseTimePart('minute')} style={[styles.calcValue, editPart === 'minute' && { borderBottomColor: c.accent, borderBottomWidth: 2 }]}><Text style={[styles.calcDigits, { color: c.fg }]}>{minute}</Text><Text style={[styles.calcUnit, { color: c.muted }]}>MIN</Text></Pressable>
+              <Text style={[styles.calcResult, { color: c.muted }]}>{calcBuffer || 'ANS'}</Text>
+            </View>
+            <View style={styles.calcGrid}>
+              {[
+                ['AC', 'DEL', '%', '÷'], ['7', '8', '9', '×'], ['4', '5', '6', '−'], ['1', '2', '3', '+'], ['H', '0', 'M', '='],
+              ].flat().map((key) => {
+                const isDigit = /^\d$/.test(key);
+                const operator = !isDigit;
+                const selectedKey = key === 'H' ? editPart === 'hour' : key === 'M' ? editPart === 'minute' : false;
+                return <Pressable key={key} accessibilityLabel={isDigit ? `Enter ${key}` : `Calculator key ${key}`} onPress={() => isDigit ? pressDigit(key) : pressOperator(key)} style={[styles.calcKey, { backgroundColor: key === '=' ? c.accent : selectedKey ? c.accentBg : operator ? (dark ? '#22242A' : '#EDF0F5') : (dark ? '#17171B' : '#FFFFFF'), borderColor: c.line }]}><Text style={{ color: key === '=' ? '#FFFFFF' : selectedKey ? c.accent : operator ? c.accent : c.fg, fontSize: key.length > 1 ? 12 : 18, fontWeight: '700' }}>{key}</Text></Pressable>;
+              })}
+            </View>
+            <Text style={[styles.helper, { color: c.muted }]}>Enter a value. Or an operation. The clock is listening.</Text>
             <View style={styles.actionRow}>
               {buttonSwap ? btn('Set alarm', () => { setHour('07'); setMinute('30'); mistake('Alarm cancelled. Form cleared.'); }, false, { borderColor: c.line, flex: 1 }) : btn('Set alarm', openCaptcha, false, { borderColor: c.line, flex: 1 })}
               {buttonSwap ? btn('Cancel', openCaptcha, true, { flex: 1 }) : btn('Cancel', () => { setHour('07'); setMinute('30'); mistake('Alarm cancelled. Form cleared.'); }, true, { flex: 1 })}
@@ -215,5 +250,6 @@ export default function TodayScreen() {
 }
 
 const styles = StyleSheet.create({
+  calcTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, calcSub: { fontSize: 8, letterSpacing: 1, marginTop: 4, fontWeight: '700' }, calcMemory: { fontSize: 11, fontWeight: '900', letterSpacing: 1 }, calcDisplay: { minHeight: 75, borderWidth: 1, borderRadius: 12, marginTop: 12, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center' }, calcValue: { minWidth: 52, alignItems: 'center', paddingVertical: 5, borderBottomWidth: 2, borderBottomColor: 'transparent' }, calcDigits: { fontSize: 28, fontWeight: '800', fontVariant: ['tabular-nums'] }, calcUnit: { fontSize: 8, letterSpacing: 1, fontWeight: '700', marginTop: 2 }, calcColon: { fontSize: 23, fontWeight: '700', marginHorizontal: 1, marginBottom: 8 }, calcResult: { marginLeft: 'auto', fontSize: 10, fontWeight: '700', letterSpacing: 1 }, calcGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 7, marginTop: 12 }, calcKey: { width: '23%', height: 43, borderRadius: 10, borderWidth: 1, justifyContent: 'center', alignItems: 'center' },
   page: { paddingHorizontal: 22, paddingTop: 10, paddingBottom: 30 }, topLine: { flexDirection: 'row', alignItems: 'center' }, brand: { fontSize: 19, letterSpacing: 1.1, fontWeight: '900' }, kicker: { fontSize: 9, letterSpacing: 1.4, marginTop: 3, fontWeight: '600' }, session: { borderWidth: 1, borderRadius: 12, paddingVertical: 8, paddingHorizontal: 11, minWidth: 105 }, liveDot: { position: 'absolute', width: 6, height: 6, borderRadius: 3, backgroundColor: '#E76767', top: 12, right: 11 }, warning: { fontSize: 11, marginTop: 12, marginBottom: 18, fontWeight: '600' }, hero: { borderRadius: 22, padding: 22, minHeight: 174, justifyContent: 'center' }, heroHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, heroEyebrow: { fontSize: 10, color: '#B8C4D5', letterSpacing: 1.3, fontWeight: '700' }, nowPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFFFFF18', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 20 }, whiteDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#8DE0B2', marginRight: 5 }, nowText: { color: '#DDE6F2', fontSize: 9, fontWeight: '800' }, bigTime: { color: '#FFFFFF', fontSize: 52, lineHeight: 61, fontWeight: '800', letterSpacing: -2, marginTop: 10 }, heroSub: { color: '#AAB9CC', fontSize: 12 }, sectionHeading: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginTop: 25, marginBottom: 11 }, heading: { fontSize: 18, fontWeight: '800', letterSpacing: -0.3 }, sectionMeta: { fontSize: 9, letterSpacing: 1, fontWeight: '700' }, card: { borderWidth: 1, borderRadius: 18, padding: 17 }, label: { fontSize: 10, letterSpacing: 1.1, fontWeight: '700' }, timeRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 }, timeInput: { borderWidth: 1, borderRadius: 12, width: 76, height: 58, textAlign: 'center', fontSize: 27, fontWeight: '800' }, colon: { fontSize: 28, fontWeight: '700', marginHorizontal: 8 }, amPm: { fontSize: 11, fontWeight: '800' }, helper: { fontSize: 11, marginTop: 7 }, actionRow: { flexDirection: 'row', gap: 9, marginTop: 15 }, button: { minHeight: 44, paddingHorizontal: 13, borderWidth: 1, borderRadius: 11, justifyContent: 'center', alignItems: 'center' }, emptyCard: { borderWidth: 1, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center' }, emptyIcon: { fontSize: 30, marginRight: 13 }, emptyTitle: { fontSize: 14, fontWeight: '700' }, alarmRow: { borderWidth: 1, borderRadius: 16, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 8 }, alarmTime: { fontSize: 22, fontWeight: '800' }, trigger: { borderWidth: 1, borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 }, triggerIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, footer: { textAlign: 'center', letterSpacing: 1.2, fontSize: 9, marginTop: 25 }, toast: { position: 'absolute', bottom: 20, left: 18, right: 18, backgroundColor: '#252932', borderRadius: 12, padding: 13, elevation: 9 }, toastText: { color: '#FFFFFF', fontSize: 12, textAlign: 'center', fontWeight: '600' }, scrim: { flex: 1, backgroundColor: '#080B12B8', justifyContent: 'center', padding: 22 }, dialog: { borderRadius: 22, padding: 20, maxWidth: 460, width: '100%', alignSelf: 'center' }, modalKicker: { fontSize: 10, fontWeight: '800', letterSpacing: 1.2 }, modalTitle: { fontSize: 20, fontWeight: '800', lineHeight: 27, marginTop: 8 }, tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, justifyContent: 'center' }, tile: { width: '31%', aspectRatio: 1, borderWidth: 1, borderRadius: 10, justifyContent: 'center', alignItems: 'center' }, ringScrim: { flex: 1, backgroundColor: '#07090DEB', justifyContent: 'center', padding: 22 }, ringDialog: { backgroundColor: '#10141B', borderRadius: 24, padding: 22, alignItems: 'center', borderWidth: 1, borderColor: '#303844' }, ringKicker: { color: '#FF8A79', fontSize: 10, letterSpacing: 2, fontWeight: '800' }, ringTitle: { color: '#FFFFFF', fontSize: 31, fontWeight: '900', marginTop: 5 }, ringCopy: { color: '#ABB3C0', fontSize: 13, marginTop: 6, marginBottom: 18 }, sudoku: { width: 240, height: 240, flexDirection: 'row', flexWrap: 'wrap', borderWidth: 2, borderColor: '#697281' }, sudokuCell: { width: '25%', height: '25%', justifyContent: 'center', alignItems: 'center', borderWidth: 1 }, numRow: { flexDirection: 'row', gap: 10, marginTop: 15 }, numKey: { width: 48, height: 42, backgroundColor: '#26364F', borderRadius: 10, justifyContent: 'center', alignItems: 'center' }, numText: { color: '#FFFFFF', fontSize: 18, fontWeight: '800' }, sudokuHint: { color: '#798392', fontSize: 10, marginTop: 12 },
 });
