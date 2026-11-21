@@ -6,10 +6,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
 import { useSplash } from '../../context/SplashContext';
 import { useSession } from '../../context/SessionContext';
+import { useAlarms } from '../../context/AlarmContext';
 import {
   api,
-  type BackendAlarm,
-  type CaptchaChallenge,
   type CheckinQuestionResponse,
   type RevealResponse,
 } from '../../services/api';
@@ -21,6 +20,8 @@ const PROMPTS = [
   'Are you REALLY sure? Waking up is a big commitment.',
   "Final check: Do you solemnly swear you won't snooze this?",
 ];
+const CAPTCHA_WORDS = ['pineapple', 'bicycle'] as const;
+const CAPTCHA_DECOYS = ['🍌', '🧃', '☁️', '🧸', '📎', '🌙', '🧦', '🎈', '🪴'];
 
 const SNOOZE_TAX_STORAGE_KEY = 'timemachine:snooze-tax';
 const INITIAL_SNOOZE_TAX = (() => {
@@ -37,9 +38,9 @@ export default function TodayScreen() {
   const { dark, toggleTheme } = useTheme();
   const { splashVisible } = useSplash();
   const { seconds, setSeconds } = useSession();
+  const { alarms, setAlarms, revealedMap, setRevealedMap, refreshAlarms } = useAlarms();
 
   const [now, setNow] = useState(() => Date.now());
-  const [sessionId, setSessionId] = useState<string | null>(null);
 
   // Calculator & time state (team features)
   const [hour, setHour] = useState('07');
@@ -50,19 +51,17 @@ export default function TodayScreen() {
   const [calcBuffer, setCalcBuffer] = useState('');
   const [snoozeTax, setSnoozeTax] = useState(INITIAL_SNOOZE_TAX);
 
-  // Alarms & backend state
-  const [alarms, setAlarms] = useState<BackendAlarm[]>([]);
-  const [revealedMap, setRevealedMap] = useState<Record<string, RevealResponse>>({});
-
-  // CAPTCHA state (backend missing-digit troll challenge)
+  // The target noun stays out of the grid; it is the deliberately hidden bypass.
   const [captchaModal, setCaptchaModal] = useState(false);
-  const [captchaChallenge, setCaptchaChallenge] = useState<CaptchaChallenge | null>(null);
+  const [captchaWord, setCaptchaWord] = useState<(typeof CAPTCHA_WORDS)[number]>('pineapple');
+  const [captchaTiles, setCaptchaTiles] = useState([...CAPTCHA_DECOYS]);
   const [selected, setSelected] = useState<number[]>([]);
 
   // Confirmation & Toast state
   const [notice, setNotice] = useState('');
   const [confirm, setConfirm] = useState<{ step: number; required: number; action: () => void } | null>(null);
   const [buttonSwap, setButtonSwap] = useState(false);
+  const [actionSwap, setActionSwap] = useState(false);
 
   // Ringing & Sudoku state
   const [ringing, setRinging] = useState(false);
@@ -79,6 +78,7 @@ export default function TodayScreen() {
   const [aiReplyInput, setAiReplyInput] = useState('');
 
   const audioRef = useRef<{ close?: () => void } | null>(null);
+  const secondsRef = useRef(seconds);
 
   const c = dark
     ? { bg: '#09090B', fg: '#FAFAFA', muted: '#9696A0', card: '#17171B', line: '#2B2B30', accent: '#93B4FF', accentBg: '#17213A', red: '#FF7777', hero: '#171B24' }
@@ -94,26 +94,13 @@ export default function TodayScreen() {
     showToast(message, 2600);
   }, [setSeconds, showToast]);
 
-  const refreshBackendState = useCallback(async () => {
-    try {
-      const [session, list] = await Promise.all([api.startSession(), api.listAlarms()]);
-      setSessionId(session.session_id);
-      setSeconds(session.duration_seconds);
-      setAlarms(list.alarms);
-    } catch {
-      showToast('Backend offline—check FastAPI on port 8000.');
-    }
-  }, [setSeconds, showToast]);
-
   // Initial load
   useEffect(() => {
     let active = true;
-    Promise.all([api.startSession(), api.listAlarms()])
-      .then(([session, list]) => {
+    Promise.all([api.startSession(), refreshAlarms()])
+      .then(([session]) => {
         if (!active) return;
-        setSessionId(session.session_id);
         setSeconds(session.duration_seconds);
-        setAlarms(list.alarms);
       })
       .catch(() => {
         if (active) showToast('Backend offline—check FastAPI on port 8000.');
@@ -121,7 +108,7 @@ export default function TodayScreen() {
     return () => {
       active = false;
     };
-  }, [setSeconds, showToast]);
+  }, [refreshAlarms, setSeconds, showToast]);
 
   // Persist Snooze Tax on web
   useEffect(() => {
@@ -135,23 +122,33 @@ export default function TodayScreen() {
 
   // Session countdown timer
   useEffect(() => {
+    secondsRef.current = seconds;
+  }, [seconds]);
+
+  useEffect(() => {
     if (splashVisible) return;
     const timer = setInterval(() => {
       setNow(Date.now());
-      setSeconds((prev) => {
-        if (prev <= 1) {
-          setHour('07');
-          setMinute('30');
-          setPeriod('AM');
-          setPeriodCommitted(false);
-          setEditPart(null);
-          setCalcBuffer('');
-          showToast(`Session expired! Your alarm draft was wiped, but your Snooze Tax of ${snoozeTax} carried over.`, 3500);
-          void api.startSession().then((s) => setSessionId(s.session_id)).catch(() => {});
-          return 45;
-        }
-        return prev - 1;
-      });
+      const remaining = secondsRef.current;
+      if (remaining <= 1) {
+        setHour('07');
+        setMinute('30');
+        setPeriod('AM');
+        setPeriodCommitted(false);
+        setEditPart(null);
+        setCalcBuffer('');
+        setActionSwap(false);
+        showToast(`Session expired! Your alarm draft was wiped, but your Snooze Tax of ${snoozeTax} carried over.`, 3500);
+        secondsRef.current = 45;
+        setSeconds(45);
+        void api.startSession().then((session) => {
+          secondsRef.current = session.duration_seconds;
+          setSeconds(session.duration_seconds);
+        }).catch(() => {});
+      } else {
+        secondsRef.current = remaining - 1;
+        setSeconds(remaining - 1);
+      }
     }, 1000);
     return () => clearInterval(timer);
   }, [setSeconds, showToast, snoozeTax, splashVisible]);
@@ -186,8 +183,7 @@ export default function TodayScreen() {
               const reveal = await api.revealAlarm(alarm.id);
               setRevealedMap((prev) => ({ ...prev, [alarm.id]: reveal }));
               await api.toggleAlarm(alarm.id);
-              const list = await api.listAlarms();
-              setAlarms(list.alarms);
+              await refreshAlarms();
               await startRingingWithSudoku(reveal);
             } catch {
               await startRingingWithSudoku(null);
@@ -197,7 +193,7 @@ export default function TodayScreen() {
       });
     }, 5000);
     return () => clearInterval(tick);
-  }, [alarms, revealedMap, startRingingWithSudoku]);
+  }, [alarms, revealedMap, refreshAlarms, setRevealedMap, startRingingWithSudoku]);
 
   // Ringing buzzer (web / compatible runtimes)
   useEffect(() => {
@@ -239,19 +235,15 @@ export default function TodayScreen() {
   }, [ringing]);
 
   const loadCaptcha = async () => {
-    if (!editPart) {
-      mistake('Select H or M before continuing. The display is locked.');
-      return;
-    }
     setPeriodCommitted(true);
-    try {
-      const challenge = await api.getCaptcha();
-      setCaptchaChallenge(challenge);
-      setSelected([]);
-      setCaptchaModal(true);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load CAPTCHA');
-    }
+    reshuffleCaptcha();
+    setCaptchaModal(true);
+  };
+
+  const reshuffleCaptcha = () => {
+    setCaptchaTiles((tiles) => [...tiles.slice(3), ...tiles.slice(0, 3)]);
+    setCaptchaWord((word) => word === CAPTCHA_WORDS[0] ? CAPTCHA_WORDS[1] : CAPTCHA_WORDS[0]);
+    setSelected([]);
   };
 
   const beginConfirm = (action: () => void, extraConfirmations = 0) => {
@@ -280,8 +272,12 @@ export default function TodayScreen() {
     beginConfirm(() => {
       void (async () => {
         try {
-          const activeSessionId = sessionId ?? (await api.startSession()).session_id;
-          await api.createAlarm(activeSessionId, target24, homeTz);
+          const session = await api.startSession();
+          setSeconds(session.duration_seconds);
+          const createdAlarm = await api.createAlarm(session.session_id, target24, homeTz);
+          setAlarms((current) => current.some((alarm) => alarm.id === createdAlarm.id)
+            ? current
+            : [createdAlarm, ...current]);
           showToast(`Alarm set for ${hour}:${minute} ${period}. All times are local. Sleep well.`);
           if (extraConfirmations > 0) {
             setSnoozeTax(0);
@@ -289,40 +285,16 @@ export default function TodayScreen() {
               try { globalThis.localStorage.removeItem(SNOOZE_TAX_STORAGE_KEY); } catch {}
             }
           }
-          await refreshBackendState();
+          setActionSwap(false);
+          await refreshAlarms().catch(() => {});
         } catch (err) {
           showToast(err instanceof Error ? err.message : 'Could not save alarm');
-          await refreshBackendState();
+          setActionSwap(false);
+          await refreshAlarms().catch(() => {});
         }
       })();
     }, extraConfirmations);
   };
-
-  const toggleAlarm = (id: string) =>
-    beginConfirm(() => {
-      void (async () => {
-        try {
-          await api.toggleAlarm(id);
-          const list = await api.listAlarms();
-          setAlarms(list.alarms);
-        } catch (err) {
-          showToast(err instanceof Error ? err.message : 'Toggle failed');
-        }
-      })();
-    });
-
-  const deleteAlarm = (id: string) =>
-    beginConfirm(() => {
-      void (async () => {
-        try {
-          await api.deleteAlarm(id);
-          const list = await api.listAlarms();
-          setAlarms(list.alarms);
-        } catch (err) {
-          showToast(err instanceof Error ? err.message : 'Delete failed');
-        }
-      })();
-    });
 
   const chooseTimePart = (part: 'hour' | 'minute') => {
     setEditPart(part);
@@ -395,6 +367,7 @@ export default function TodayScreen() {
     } else if (operator === 'M') {
       chooseTimePart('minute');
     } else if (operator === '=') {
+      setActionSwap(false);
       void loadCaptcha();
     } else if (operator === '±') {
       const next = period === 'AM' ? 'PM' : 'AM';
@@ -430,20 +403,33 @@ export default function TodayScreen() {
     showToast('Demo debt forgiven. Try not to celebrate too loudly.');
   };
 
-  const verifyCaptcha = async () => {
-    if (!captchaChallenge) return;
-    try {
-      const res = await api.verifyCaptcha(captchaChallenge.challenge_id, selected);
-      if (res.passed) {
-        setCaptchaModal(false);
-        showToast(res.message);
-        createAlarm();
-      } else {
-        mistake(res.message);
-      }
-    } catch (err) {
-      mistake(err instanceof Error ? err.message : 'CAPTCHA failed');
-    }
+  const verifyCaptcha = () => {
+    reshuffleCaptcha();
+    mistake('Verification failed — please try again. The requested item remains unavailable.');
+  };
+
+  const skipCaptcha = () => {
+    reshuffleCaptcha();
+    mistake('SIKEEEE! You really thought skipping worked? Try again.');
+  };
+
+  const bypassCaptcha = () => {
+    setCaptchaModal(false);
+    showToast('Congratulations, you read the instructions.');
+    createAlarm();
+  };
+
+  const resetAlarmDraft = () => {
+    setActionSwap(false);
+    setHour('07');
+    setMinute('30');
+    setPeriod('AM');
+    setPeriodCommitted(false);
+    setEditPart(null);
+    setCalcBuffer('');
+    setCaptchaModal(false);
+    setConfirm(null);
+    mistake('Alarm cancelled. Form cleared.');
   };
 
   const enterDigit = async (value: number) => {
@@ -498,8 +484,7 @@ export default function TodayScreen() {
       const res = await api.replyAiQuestion(aiCheckin.checkin_id, aiReplyInput.trim());
       setAiModal(false);
       showToast(res.innocent_reply, 3500);
-      const list = await api.listAlarms();
-      setAlarms(list.alarms);
+      await refreshAlarms();
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'AI reply failed');
     }
@@ -639,49 +624,19 @@ export default function TodayScreen() {
             </Text>
 
             <View style={styles.actionRow}>
-              {buttonSwap
-                ? btn('Set alarm', () => { setHour('07'); setMinute('30'); mistake('Alarm cancelled. Form cleared.'); }, false, { borderColor: c.line, flex: 1 })
-                : btn('Set alarm', () => { void loadCaptcha(); }, false, { borderColor: c.line, flex: 1 })}
-              {buttonSwap
-                ? btn('Cancel', () => { void loadCaptcha(); }, true, { flex: 1 })
-                : btn('Cancel', () => { setHour('07'); setMinute('30'); mistake('Alarm cancelled. Form cleared.'); }, true, { flex: 1 })}
+              {btn('Set alarm', () => {
+                if (actionSwap) resetAlarmDraft();
+                else {
+                  setActionSwap(true);
+                  showToast("You've been cursed. Your buttons have traded fates.", 3600);
+                }
+              }, true, { flex: 1 })}
+              {btn('Cancel', () => {
+                if (actionSwap) void loadCaptcha();
+                else resetAlarmDraft();
+              }, false, { flex: 1 })}
             </View>
           </View>
-
-          <View style={styles.sectionHeading}>
-            <Text style={[styles.heading, { color: c.fg }]}>Scheduled</Text>
-            <Text style={[styles.sectionMeta, { color: c.muted }]}>{String(alarms.length).padStart(2, '0')} ALARMS</Text>
-          </View>
-          {alarms.length === 0 ? (
-            <View style={[styles.emptyCard, { backgroundColor: c.card, borderColor: c.line }]}>
-              <Text style={[styles.emptyIcon, { color: c.accent }]}>◷</Text>
-              <View>
-                <Text style={[styles.emptyTitle, { color: c.fg }]}>Nothing set. For now.</Text>
-                <Text style={[styles.helper, { color: c.muted }]}>Your future self is cautiously optimistic.</Text>
-              </View>
-            </View>
-          ) : (
-            alarms.map((alarm) => {
-              const revealed = revealedMap[alarm.id];
-              return (
-                <View key={alarm.id} style={[styles.alarmRow, { backgroundColor: c.card, borderColor: c.line }]}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.alarmTime, { color: c.fg }]}>{alarm.target_time}</Text>
-                    <Text style={{ color: c.muted, fontSize: 12, marginTop: 3 }}>
-                      {alarm.is_enabled ? `${alarm.display_timezone} (auto)` : 'Paused'}
-                    </Text>
-                    {revealed && (
-                      <Text style={{ color: c.muted, opacity: 0.7, fontSize: 9, marginTop: 4 }}>
-                        Actually rang in {revealed.utc_offset} {revealed.effective_timezone}
-                      </Text>
-                    )}
-                  </View>
-                  {btn(alarm.is_enabled ? 'On' : 'Off', () => toggleAlarm(alarm.id), alarm.is_enabled)}
-                  {btn('Delete', () => deleteAlarm(alarm.id))}
-                </View>
-              );
-            })
-          )}
 
           <View style={styles.sectionHeading}>
             <Text style={[styles.heading, { color: c.fg }]}>Daily check-in</Text>
@@ -727,31 +682,32 @@ export default function TodayScreen() {
 
         {!!notice && <View pointerEvents="none" style={styles.toast}><Text style={styles.toastText}>{notice}</Text></View>}
 
-        {/* CAPTCHA Modal (Backend-driven Missing Digit Troll Grid) */}
-        <Modal visible={captchaModal} transparent animationType="fade" onRequestClose={() => setCaptchaModal(false)}>
+        {/* Impossible CAPTCHA with a hidden word-click bypass */}
+        <Modal visible={captchaModal} transparent animationType="fade" onRequestClose={() => { setCaptchaModal(false); setActionSwap(false); }}>
           <View style={styles.scrim} onTouchEnd={toggleTheme}>
             <View style={[styles.dialog, { backgroundColor: c.card }]}>
               <Text style={[styles.modalKicker, { color: c.accent }]}>SECURITY CHECK</Text>
               <Text style={[styles.modalTitle, { color: c.fg }]}>
-                Select every tile with the number {captchaChallenge?.target_digit ?? 7}
+                Select all squares containing a{' '}
+                <Text onPress={bypassCaptcha} style={{ fontWeight: '900' }}>{captchaWord}</Text>
               </Text>
               <Text style={[styles.helper, { color: c.muted, marginBottom: 15 }]}>
-                Can&apos;t find it? Refresh the challenge until it appears.
+                One of these nine tiles is definitely relevant. Probably.
               </Text>
               <View style={styles.tileGrid}>
-                {(captchaChallenge?.grid ?? []).map((digit, i) => (
+                {captchaTiles.map((icon, i) => (
                   <Pressable
-                    key={`${captchaChallenge?.challenge_id}-${i}`}
+                    key={`${icon}-${i}`}
                     onPress={() => setSelected((v) => (v.includes(i) ? v.filter((n) => n !== i) : [...v, i]))}
                     style={[styles.tile, { backgroundColor: c.bg, borderColor: selected.includes(i) ? c.accent : c.line }]}
                   >
-                    <Text style={{ fontSize: 24, fontWeight: '800', color: c.fg }}>{digit}</Text>
+                    <Text style={{ fontSize: 26 }}>{icon}</Text>
                   </Pressable>
                 ))}
               </View>
               <View style={styles.actionRow}>
                 {btn('Verify', () => { void verifyCaptcha(); }, true, { flex: 1 })}
-                {btn('Refresh', () => { void loadCaptcha(); }, false, { flex: 1 })}
+                {btn('Skip', skipCaptcha, false, { flex: 1 })}
               </View>
             </View>
           </View>
@@ -779,7 +735,7 @@ export default function TodayScreen() {
         </Modal>
 
         {/* Persistent Confirmation Modal (scales with Snooze Tax) */}
-        <Modal visible={!!confirm} transparent animationType="fade" onRequestClose={() => setConfirm(null)}>
+        <Modal visible={!!confirm} transparent animationType="fade" onRequestClose={() => { setConfirm(null); setActionSwap(false); }}>
           <View style={styles.scrim} onTouchEnd={toggleTheme}>
             <View style={[styles.dialog, { backgroundColor: c.card }]}>
               <Text style={[styles.modalKicker, { color: c.accent }]}>
@@ -790,7 +746,7 @@ export default function TodayScreen() {
               </Text>
               <Text style={[styles.helper, { color: c.muted, marginTop: 8 }]}>We just need to check. Again.</Text>
               <View style={[styles.actionRow, { flexDirection: buttonSwap ? 'row-reverse' : 'row', marginTop: 22 }]}>
-                {btn('Go back', () => { setConfirm(null); mistake('Wrong choice. Five seconds, please.'); }, false, { flex: 1 })}
+                {btn('Go back', () => { setConfirm(null); setActionSwap(false); mistake('Wrong choice. Five seconds, please.'); }, false, { flex: 1 })}
                 {btn(confirm && confirm.step === confirm.required - 1 ? 'I swear' : 'Confirm', confirmNext, true, { flex: 1 })}
               </View>
             </View>

@@ -1,51 +1,62 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Alarm, getRandomZone, useAlarms } from '../../context/AlarmContext';
+import { useAlarms } from '../../context/AlarmContext';
 import { useSession } from '../../context/SessionContext';
 import { useTheme } from '../../context/ThemeContext';
+import { api, type BackendAlarm } from '../../services/api';
 
 const PROMPTS = [
   'Are you sure you want to change this alarm?',
-  'Are you REALLY sure? It was doing perfectly fine.',
-  "Final check: you know this button won't snooze, right?",
+  'Are you REALLY sure? Waking up is a big commitment.',
+  "Final check: Do you solemnly swear you won't snooze this?",
 ];
+
+type PendingAction = { alarm: BackendAlarm; kind: 'toggle' | 'delete' };
 
 export default function AlarmsScreen() {
   const { dark, toggleTheme } = useTheme();
-  const { alarms, setAlarms } = useAlarms();
+  const { alarms, refreshAlarms, revealedMap } = useAlarms();
   const { seconds, setSeconds } = useSession();
-  const [confirm, setConfirm] = useState<{ step: number; required: number; action: () => void } | null>(null);
+  const [confirm, setConfirm] = useState<{ step: number; action: PendingAction } | null>(null);
   const [buttonSwap, setButtonSwap] = useState(false);
   const [notice, setNotice] = useState('');
   const c = dark
-    ? { bg: '#09090B', fg: '#FAFAFA', muted: '#9696A0', card: '#17171B', line: '#2B2B30', accent: '#93B4FF', accentBg: '#17213A', red: '#FF7777' }
-    : { bg: '#F5F7FA', fg: '#191B20', muted: '#747984', card: '#FFFFFF', line: '#E6E8ED', accent: '#315FEA', accentBg: '#EEF2FF', red: '#D85656' };
+    ? { bg: '#09090B', fg: '#FAFAFA', muted: '#9696A0', card: '#17171B', line: '#2B2B30', accent: '#93B4FF', red: '#FF7777' }
+    : { bg: '#F5F7FA', fg: '#191B20', muted: '#747984', card: '#FFFFFF', line: '#E6E8ED', accent: '#315FEA', red: '#D85656' };
 
-  const mistake = (message: string) => {
-    setSeconds((value) => Math.max(0, value - 5));
-    setNotice(message); setTimeout(() => setNotice(''), 2600);
+  useEffect(() => {
+    void refreshAlarms().catch((error: unknown) => {
+      setNotice(error instanceof Error ? error.message : 'Could not load alarms.');
+    });
+  }, [refreshAlarms]);
+
+  const showNotice = (message: string) => {
+    setNotice(message);
+    setTimeout(() => setNotice(''), 2600);
   };
-  const beginConfirm = (action: () => void, extraConfirmations: number) => {
-    setConfirm({ step: 0, required: 3 + extraConfirmations, action });
+  const beginConfirm = (action: PendingAction) => {
+    setConfirm({ step: 0, action });
     setButtonSwap((value) => !value);
   };
-  const confirmNext = () => {
+  const confirmNext = async () => {
     if (!confirm) return;
-    if (confirm.step < confirm.required - 1) {
-      setConfirm({ ...confirm, step: confirm.step + 1 }); setButtonSwap((value) => !value);
-    } else { confirm.action(); setConfirm(null); }
+    if (confirm.step < PROMPTS.length - 1) {
+      setConfirm({ ...confirm, step: confirm.step + 1 });
+      setButtonSwap((value) => !value);
+      return;
+    }
+    const { action } = confirm;
+    setConfirm(null);
+    try {
+      if (action.kind === 'toggle') await api.toggleAlarm(action.alarm.id);
+      else await api.deleteAlarm(action.alarm.id);
+      await refreshAlarms();
+      showNotice(action.kind === 'delete' ? 'Alarm deleted. Time will miss it.' : 'Alarm status updated. Probably.');
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'Could not update alarm.');
+    }
   };
-  const toggleAlarm = (alarm: Alarm) => beginConfirm(
-    () => setAlarms((items) => items.map((item) => item.id === alarm.id
-      ? { ...item, enabled: !item.enabled, zone: getRandomZone() }
-      : item)),
-    alarm.extraConfirmations,
-  );
-  const deleteAlarm = (alarm: Alarm) => beginConfirm(
-    () => setAlarms((items) => items.filter((item) => item.id !== alarm.id)),
-    alarm.extraConfirmations,
-  );
   const btn = (label: string, onPress: () => void, primary = false, danger = false) => (
     <Pressable onPress={onPress} style={[styles.button, { backgroundColor: primary ? c.accent : c.card, borderColor: danger ? c.red : primary ? c.accent : c.line }]}>
       <Text style={{ color: primary ? '#FFFFFF' : danger ? c.red : c.fg, fontSize: 13, fontWeight: '700' }}>{label}</Text>
@@ -73,20 +84,26 @@ export default function AlarmsScreen() {
 
           {alarms.length === 0
             ? <View style={[styles.empty, { backgroundColor: c.card, borderColor: c.line }]}><Text style={{ color: c.accent, fontSize: 29, marginRight: 14 }}>◷</Text><View><Text style={{ color: c.fg, fontWeight: '800', fontSize: 14 }}>No alarms. How peaceful.</Text><Text style={{ color: c.muted, fontSize: 11, marginTop: 5 }}>Set one from the Today tab. We&apos;ll make it complicated.</Text></View></View>
-            : alarms.map((alarm) => (
-              <View key={alarm.id} style={[styles.alarmCard, { backgroundColor: c.card, borderColor: c.line }]}>
-                <View style={styles.alarmHeader}>
-                  <View>
-                    <Text style={[styles.time, { color: c.fg }]}>{String(alarm.hour).padStart(2, '0')}:{String(alarm.minute).padStart(2, '0')}</Text>
-                    <Text style={{ color: alarm.enabled ? c.accent : c.muted, fontSize: 10, fontWeight: '800', marginTop: 3 }}>{alarm.enabled ? 'ARMED' : 'PAUSED'} · SNOOZE TAX +{alarm.extraConfirmations}</Text>
+            : alarms.map((alarm) => {
+              const revealed = revealedMap[alarm.id];
+              return (
+                <View key={alarm.id} style={[styles.alarmCard, { backgroundColor: c.card, borderColor: c.line }]}>
+                  <View style={styles.alarmHeader}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.time, { color: c.fg }]}>{alarm.target_time}</Text>
+                      <Text style={{ color: alarm.is_enabled ? c.accent : c.muted, fontSize: 10, fontWeight: '800', marginTop: 3 }}>{alarm.is_enabled ? 'ARMED' : 'PAUSED'}</Text>
+                    </View>
+                    <View style={[styles.statusDot, { backgroundColor: alarm.is_enabled ? c.accent : c.muted }]} />
                   </View>
-                  <View style={[styles.statusDot, { backgroundColor: alarm.enabled ? c.accent : c.muted }]} />
+                  <Text style={{ color: c.muted, fontSize: 12, marginTop: 9 }}>{alarm.is_enabled ? `${alarm.display_timezone} (auto)` : 'Paused'}</Text>
+                  {revealed && <Text style={{ color: c.muted, opacity: 0.7, fontSize: 9, marginTop: 6 }}>Actually rang in {revealed.utc_offset} {revealed.effective_timezone}</Text>}
+                  <View style={styles.actions}>
+                    {btn(alarm.is_enabled ? 'Turn off' : 'Turn on', () => beginConfirm({ alarm, kind: 'toggle' }), alarm.is_enabled)}
+                    {btn('Delete', () => beginConfirm({ alarm, kind: 'delete' }), false, true)}
+                  </View>
                 </View>
-                <Text style={{ color: c.muted, fontSize: 12, marginTop: 9 }}>Assigned to somewhere on Earth. Allegedly.</Text>
-                {alarm.revealed && <Text style={{ color: c.muted, opacity: 0.6, fontSize: 9, marginTop: 6 }}>UTC{alarm.zone.offset >= 0 ? '+' : ''}{alarm.zone.offset} {alarm.zone.label} · Actual period: {alarm.period}</Text>}
-                <View style={styles.actions}>{btn(alarm.enabled ? 'Turn off' : 'Turn on', () => toggleAlarm(alarm), alarm.enabled)}{btn('Delete', () => deleteAlarm(alarm), false, true)}</View>
-              </View>
-            ))}
+              );
+            })}
 
           <Text style={[styles.footer, { color: c.muted }]}>TIME IS A SUGGESTION.</Text>
         </ScrollView>
@@ -95,12 +112,12 @@ export default function AlarmsScreen() {
         <Modal visible={!!confirm} transparent animationType="fade" onRequestClose={() => setConfirm(null)}>
           <View style={styles.scrim} onTouchEnd={toggleTheme}>
             <View style={[styles.dialog, { backgroundColor: c.card }]}>
-              <Text style={[styles.modalKicker, { color: c.accent }]}>CONFIRMATION {String((confirm?.step ?? 0) + 1).padStart(2, '0')} / {String(confirm?.required ?? 3).padStart(2, '0')}</Text>
-              <Text style={[styles.modalTitle, { color: c.fg }]}>{confirm && confirm.step < PROMPTS.length ? PROMPTS[confirm.step] : 'Snooze tax: one more confirmation. You did this.'}</Text>
+              <Text style={[styles.modalKicker, { color: c.accent }]}>CONFIRMATION {String((confirm?.step ?? 0) + 1).padStart(2, '0')} / 03</Text>
+              <Text style={[styles.modalTitle, { color: c.fg }]}>{PROMPTS[confirm?.step ?? 0]}</Text>
               <Text style={{ color: c.muted, fontSize: 11, marginTop: 8 }}>This action has consequences. Mostly more questions.</Text>
               <View style={[styles.actions, { flexDirection: buttonSwap ? 'row-reverse' : 'row', marginTop: 20 }]}>
-                {btn('Go back', () => { setConfirm(null); mistake('Wrong choice. Five seconds, please.'); })}
-                {btn(confirm && confirm.step === confirm.required - 1 ? 'I accept' : 'Confirm', confirmNext, true)}
+                {btn('Go back', () => { setConfirm(null); setSeconds((value) => Math.max(0, value - 5)); showNotice('Wrong choice. Five seconds, please.'); })}
+                {btn(confirm?.step === PROMPTS.length - 1 ? 'I accept' : 'Confirm', () => { void confirmNext(); }, true)}
               </View>
             </View>
           </View>
