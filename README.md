@@ -63,4 +63,4 @@ npx tsc --noEmit     # Run TypeScript checks
 
 ---
 
-Made to make a simple morning unnecessarily complicated by the TimeMachine team.
+Made to make a simple morning unnecessarily complicated by **Ay Maliiiiii**.
