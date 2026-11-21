@@ -33,7 +33,7 @@ export default function TodayScreen() {
   const { dark, toggleTheme } = useTheme();
   const { splashVisible } = useSplash();
   const { seconds, setSeconds } = useSession();
-  const { refreshAlarms } = useAlarms();
+  const { addAlarm, refreshAlarms } = useAlarms();
 
   const [now, setNow] = useState(() => Date.now());
 
@@ -176,7 +176,8 @@ export default function TodayScreen() {
         try {
           const session = await api.startSession();
           setSeconds(session.duration_seconds);
-          await api.createAlarm(session.session_id, target24, homeTz);
+          const createdAlarm = await api.createAlarm(session.session_id, target24, homeTz);
+          addAlarm(createdAlarm);
           showToast(`Alarm set for ${hour}:${minute} ${period}. Check Alarms tab!`);
           if (extraConfirmations > 0) {
             setSnoozeTax(0);
